@@ -1,9 +1,18 @@
-import { renderNotebook, mergeCells, syncCells, type RenderedCell } from "./notebook"
+import {
+  renderNotebook,
+  mergeCells,
+  syncCells,
+  patchNotebookOutputs,
+  type RenderedCell,
+} from "./notebook"
 import { handleIopub, reconcileBusyStatus, type PendingExec } from "./iopub"
+import { writeNotebookFile } from "./persist"
 
 let currentCells: RenderedCell[] = []
+let currentNotebookJson: any = null
 let notebookKernelName: string | undefined
 let notebookDir: string | undefined
+let notebookPath: string | undefined
 
 let wsServer: import("bun").Server<undefined>
 
@@ -20,6 +29,29 @@ function broadcastCell(index: number) {
     "notebook",
     JSON.stringify({ type: "cell_update", index, cell: currentCells[index] }),
   )
+}
+
+/**
+ * Writes execution results into the real .ipynb file right after a cell
+ * settles, rather than waiting for an explicit save. jupytext's percent
+ * format has no channel for outputs at all - without this, results computed
+ * here only ever exist in this server's memory and the browser popup,
+ * never in the file itself, so tools like `jupyter nbconvert` would always
+ * see empty outputs. jupytext.vim's own --update save mode preserves
+ * whatever's already on disk for a cell whose source hasn't changed, so
+ * writing here is enough for those results to survive every later save.
+ * Best-effort and non-fatal: a disk write failing here shouldn't break the
+ * live preview.
+ */
+async function persistOutputsToDisk() {
+  if (!notebookPath || !currentNotebookJson) return
+
+  try {
+    patchNotebookOutputs(currentNotebookJson, currentCells)
+    await writeNotebookFile(notebookPath, currentNotebookJson)
+  } catch (error) {
+    console.error("[ipynb-peek] failed to persist outputs to disk:", error)
+  }
 }
 
 /**
@@ -99,7 +131,10 @@ function startBridge(kernelName: string) {
         bridgeMessage.content,
         currentCells,
         pendingExecs,
-        broadcastCell,
+        (index) => {
+          broadcastCell(index)
+          if (currentCells[index]?.status === "idle") void persistOutputsToDisk()
+        },
       )
     else if (bridgeMessage.type === "error") console.error("[kernel-bridge]", bridgeMessage.message)
     else if (bridgeMessage.type === "kernel_exit")
@@ -200,9 +235,12 @@ export function createServer(port: number = Number(process.env.IPYNB_PEEK_PORT ?
         return handleJsonRoute(async () => {
           const dirHeader = req.headers.get("x-notebook-dir")
           if (dirHeader) notebookDir = dirHeader
+          const pathHeader = req.headers.get("x-notebook-path")
+          if (pathHeader) notebookPath = pathHeader
           const raw = await req.text()
           const nb = JSON.parse(raw)
           notebookKernelName = nb.metadata?.kernelspec?.name ?? notebookKernelName
+          currentNotebookJson = nb
           currentCells = mergeCells(currentCells, renderNotebook(nb))
           reconcileBusyStatus(currentCells, pendingExecs)
           broadcastFull()

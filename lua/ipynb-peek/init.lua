@@ -65,9 +65,11 @@ local function current_content(bufnr)
 end
 
 --- Authoritative full re-render from disk, on save. Also tells the server
---- the notebook's directory so the kernel it spawns uses that as its cwd -
+--- the notebook's directory (so the kernel it spawns uses that as its cwd -
 --- matches Jupyter/VS Code convention, and is what makes relative paths
---- like "../data/foo.csv" resolve correctly.
+--- like "../data/foo.csv" resolve correctly) and the notebook's own full
+--- path (so the server can write execution results back into the real
+--- .ipynb file - see persistOutputsToDisk on the server side).
 local function schedule_render(bufnr)
   if not server.ready then
     return
@@ -76,8 +78,9 @@ local function schedule_render(bufnr)
   if not content then
     return
   end
-  local dir = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":h")
-  local headers = { "X-Notebook-Dir: " .. dir }
+  local path = vim.api.nvim_buf_get_name(bufnr)
+  local dir = vim.fn.fnamemodify(path, ":h")
+  local headers = { "X-Notebook-Dir: " .. dir, "X-Notebook-Path: " .. path }
   client.debounced_request(
     "render",
     server.port,

@@ -171,3 +171,69 @@ export function syncCells(
     }
   })
 }
+
+/**
+ * Reverses renderOutput's simplification back into a best-effort nbformat
+ * output object, so execution results can be written back into the real
+ * .ipynb file. Not a byte-perfect round-trip: stream outputs keep their
+ * exact output_type/name, but execute_result/display_data/image/latex all
+ * collapse to display_data, since CellOutput doesn't retain which iopub
+ * message type an output originally came from. nbconvert and other tools
+ * render execute_result/display_data identically either way - the only
+ * loss is the "Out[n]:" prompt label on the cell's own return value.
+ */
+export function toNbformatOutput(output: CellOutput): any {
+  switch (output.kind) {
+    case "text":
+      if (output.stream)
+        return { output_type: "stream", name: output.stream, text: [output.content] }
+      return { output_type: "display_data", data: { "text/plain": [output.content] }, metadata: {} }
+    case "html":
+      return { output_type: "display_data", data: { "text/html": [output.content] }, metadata: {} }
+    case "latex":
+      return { output_type: "display_data", data: { "text/latex": [output.content] }, metadata: {} }
+    case "image":
+      return { output_type: "display_data", data: { "image/png": output.data }, metadata: {} }
+    case "error":
+      return {
+        output_type: "error",
+        ename: "Error",
+        evalue: "",
+        traceback: output.content.split("\n"),
+      }
+  }
+}
+
+/**
+ * Patches execution results from `currentCells` into `notebookJson`'s
+ * matching cells, in place, so jupytext.vim's own --update save mode (which
+ * preserves existing outputs for any cell whose source hasn't changed) can
+ * keep them around on every subsequent save. Matches cells by searching for
+ * matching source text rather than trusting array position, for the same
+ * reason resolveCellIndex does in iopub.ts - positions drift under
+ * live-typing sync. A cell with no match on disk (deleted, or the notebook
+ * hasn't been saved since it was added), or with source text duplicated
+ * elsewhere in the notebook, is a known, inherent limitation without stable
+ * cell identity - skipped, or best-effort first-match, respectively, rather
+ * than guessed at riskily.
+ */
+export function patchNotebookOutputs(notebookJson: any, currentCells: RenderedCell[]): any {
+  const nbCells = Array.isArray(notebookJson?.cells) ? notebookJson.cells : []
+
+  for (const cell of currentCells) {
+    if (cell.cell_type !== "code") continue
+    if (cell.status === "busy") continue
+    if (cell.outputs.length === 0 && cell.execution_count == null) continue
+
+    const nbCell = nbCells.find(
+      (candidate: any) =>
+        candidate.cell_type === "code" && joinSource(candidate.source) === cell.source,
+    )
+    if (!nbCell) continue
+
+    nbCell.outputs = cell.outputs.map(toNbformatOutput)
+    nbCell.execution_count = cell.execution_count ?? null
+  }
+
+  return notebookJson
+}

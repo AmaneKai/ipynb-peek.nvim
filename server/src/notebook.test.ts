@@ -7,7 +7,10 @@ import {
   renderNotebook,
   mergeCells,
   syncCells,
+  toNbformatOutput,
+  patchNotebookOutputs,
   type CellOutput,
+  type RenderedCell,
 } from "./notebook"
 
 describe("joinSource", () => {
@@ -242,5 +245,106 @@ describe("syncCells", () => {
       source: "# hello",
       outputs: [],
     })
+  })
+})
+
+describe("toNbformatOutput", () => {
+  test("keeps a stream output's exact output_type and name", () => {
+    const output = toNbformatOutput({ kind: "text", content: "hi\n", stream: "stderr" })
+    expect(output).toEqual({ output_type: "stream", name: "stderr", text: ["hi\n"] })
+  })
+
+  test("renders a non-stream text output as display_data", () => {
+    const output = toNbformatOutput({ kind: "text", content: "42" })
+    expect(output).toEqual({
+      output_type: "display_data",
+      data: { "text/plain": ["42"] },
+      metadata: {},
+    })
+  })
+
+  test("renders an image output as display_data with image/png data", () => {
+    const output = toNbformatOutput({ kind: "image", data: "base64data" })
+    expect(output).toEqual({
+      output_type: "display_data",
+      data: { "image/png": "base64data" },
+      metadata: {},
+    })
+  })
+
+  test("renders an error output with the traceback split back into lines", () => {
+    const output = toNbformatOutput({ kind: "error", content: "line one\nline two" })
+    expect(output).toEqual({
+      output_type: "error",
+      ename: "Error",
+      evalue: "",
+      traceback: ["line one", "line two"],
+    })
+  })
+})
+
+describe("patchNotebookOutputs", () => {
+  function makeCell(overrides: Partial<RenderedCell> = {}): RenderedCell {
+    return { index: 0, cell_type: "code", source: "1 + 1", outputs: [], ...overrides }
+  }
+
+  test("writes outputs and execution_count into the matching cell by source text", () => {
+    const notebookJson: any = {
+      cells: [{ cell_type: "code", source: ["1 + 1"], outputs: [], execution_count: null }],
+    }
+    const cells = [
+      makeCell({
+        outputs: [{ kind: "text", content: "2", stream: "stdout" }],
+        execution_count: 1,
+      }),
+    ]
+
+    patchNotebookOutputs(notebookJson, cells)
+
+    expect(notebookJson.cells[0].outputs).toEqual([
+      { output_type: "stream", name: "stdout", text: ["2"] },
+    ])
+    expect(notebookJson.cells[0].execution_count).toBe(1)
+  })
+
+  test("skips a cell that's still busy, rather than persisting a mid-execution snapshot", () => {
+    const notebookJson: any = {
+      cells: [{ cell_type: "code", source: ["1 + 1"], outputs: [], execution_count: null }],
+    }
+    const cells = [makeCell({ status: "busy", outputs: [] })]
+
+    patchNotebookOutputs(notebookJson, cells)
+
+    expect(notebookJson.cells[0].outputs).toEqual([])
+  })
+
+  test("skips a cell with no matching source anywhere in the notebook file", () => {
+    const notebookJson: any = {
+      cells: [{ cell_type: "code", source: ["untouched"], outputs: [], execution_count: null }],
+    }
+    const cells = [
+      makeCell({
+        source: "not present on disk",
+        outputs: [{ kind: "text", content: "x" }],
+        execution_count: 1,
+      }),
+    ]
+
+    patchNotebookOutputs(notebookJson, cells)
+
+    expect(notebookJson.cells[0].outputs).toEqual([])
+    expect(notebookJson.cells[0].execution_count).toBeNull()
+  })
+
+  test("skips a cell with no execution results to persist", () => {
+    const notebookJson: any = {
+      cells: [{ cell_type: "code", source: ["1 + 1"], outputs: [], execution_count: null }],
+    }
+    const cells = [makeCell()]
+
+    patchNotebookOutputs(notebookJson, cells)
+
+    expect(notebookJson.cells[0].outputs).toEqual([])
+    expect(notebookJson.cells[0].execution_count).toBeNull()
   })
 })
