@@ -162,6 +162,14 @@ export function createServer(port: number = Number(process.env.IPYNB_PEEK_PORT ?
   const server = Bun.serve({
     port,
     /**
+     * Without this, Bun defaults to binding 0.0.0.0 - reachable from anyone
+     * else on the same network, not just this machine. /execute runs
+     * arbitrary code against a live kernel with no authentication, so this
+     * has to stay localhost-only. Every caller (Neovim's curl requests, the
+     * popup browser) already only ever targets 127.0.0.1.
+     */
+    hostname: "127.0.0.1",
+    /**
      * Bun's default idle-connection timeout (~10s) would otherwise kill the
      * long-lived /events stream (Neovim's push channel) the moment nothing
      * happens for a while - which is most of the time, since it's only used
