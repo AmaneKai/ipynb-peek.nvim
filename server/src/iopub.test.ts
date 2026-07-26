@@ -8,6 +8,8 @@ import {
   applyErrorMessage,
   applyClearOutputMessage,
   handleIopub,
+  reconcileBusyStatus,
+  type PendingExec,
 } from "./iopub"
 
 function makeCell(overrides: Partial<RenderedCell> = {}): RenderedCell {
@@ -20,10 +22,14 @@ function makeCell(overrides: Partial<RenderedCell> = {}): RenderedCell {
   }
 }
 
+function pendingMap(entries: [string, PendingExec][]): Map<string, PendingExec> {
+  return new Map(entries)
+}
+
 describe("applyStatusMessage", () => {
   test("marks the cell busy and leaves pendingExecs untouched", () => {
     const cell = makeCell()
-    const pendingExecs = new Map([["parent-1", 0]])
+    const pendingExecs = pendingMap([["parent-1", { index: 0, source: cell.source }]])
 
     applyStatusMessage(cell, { execution_state: "busy" }, "parent-1", pendingExecs)
 
@@ -33,7 +39,7 @@ describe("applyStatusMessage", () => {
 
   test("marks idle, records duration, and clears the pending entry", () => {
     const cell = makeCell({ status: "busy", started_at: Date.now() - 50 })
-    const pendingExecs = new Map([["parent-1", 0]])
+    const pendingExecs = pendingMap([["parent-1", { index: 0, source: cell.source }]])
 
     applyStatusMessage(cell, { execution_state: "idle" }, "parent-1", pendingExecs)
 
@@ -58,10 +64,32 @@ describe("applyExecuteInputMessage", () => {
 })
 
 describe("applyStreamMessage", () => {
-  test("appends a text output built from the stream content", () => {
+  test("appends a text output tagged with the stream name", () => {
     const cell = makeCell()
-    applyStreamMessage(cell, { text: ["hello\n"] })
-    expect(cell.outputs).toEqual([{ kind: "text", content: "hello\n" }])
+    applyStreamMessage(cell, { name: "stdout", text: ["hello\n"] })
+    expect(cell.outputs).toEqual([{ kind: "text", content: "hello\n", stream: "stdout" }])
+  })
+
+  test("merges consecutive chunks from the same stream into one output", () => {
+    const cell = makeCell()
+    applyStreamMessage(cell, { name: "stdout", text: ["\rprogress 0"] })
+    applyStreamMessage(cell, { name: "stdout", text: ["\rprogress 1"] })
+    applyStreamMessage(cell, { name: "stdout", text: ["\rprogress 2"] })
+
+    expect(cell.outputs).toEqual([
+      { kind: "text", content: "\rprogress 0\rprogress 1\rprogress 2", stream: "stdout" },
+    ])
+  })
+
+  test("keeps stdout and stderr as separate outputs even when interleaved", () => {
+    const cell = makeCell()
+    applyStreamMessage(cell, { name: "stdout", text: ["out\n"] })
+    applyStreamMessage(cell, { name: "stderr", text: ["err\n"] })
+
+    expect(cell.outputs).toEqual([
+      { kind: "text", content: "out\n", stream: "stdout" },
+      { kind: "text", content: "err\n", stream: "stderr" },
+    ])
   })
 })
 
@@ -74,6 +102,18 @@ describe("applyResultMessage", () => {
       "execute_result",
     )
     expect(cell.outputs).toEqual([{ kind: "image", data: "data" }])
+  })
+
+  test("renders text/latex as a latex output", () => {
+    const cell = makeCell()
+    applyResultMessage(cell, { data: { "text/latex": "$x^2$" } }, "display_data")
+    expect(cell.outputs).toEqual([{ kind: "latex", content: "$x^2$" }])
+  })
+
+  test("pretty-prints application/json instead of falling back to a repr placeholder", () => {
+    const cell = makeCell()
+    applyResultMessage(cell, { data: { "application/json": { a: 1 } } }, "display_data")
+    expect(cell.outputs).toEqual([{ kind: "text", content: JSON.stringify({ a: 1 }, null, 2) }])
   })
 
   test("records execution_count only for execute_result, not display_data", () => {
@@ -112,20 +152,25 @@ describe("applyClearOutputMessage", () => {
 describe("handleIopub", () => {
   test("dispatches a stream message to the right cell and notifies the caller", () => {
     const cells = [makeCell()]
-    const pendingExecs = new Map([["parent-1", 0]])
+    const pendingExecs = pendingMap([["parent-1", { index: 0, source: cells[0].source }]])
     const updated: number[] = []
 
-    handleIopub("parent-1", "stream", { text: ["output"] }, cells, pendingExecs, (index) =>
-      updated.push(index),
+    handleIopub(
+      "parent-1",
+      "stream",
+      { name: "stdout", text: ["output"] },
+      cells,
+      pendingExecs,
+      (index) => updated.push(index),
     )
 
-    expect(cells[0].outputs).toEqual([{ kind: "text", content: "output" }])
+    expect(cells[0].outputs).toEqual([{ kind: "text", content: "output", stream: "stdout" }])
     expect(updated).toEqual([0])
   })
 
   test("ignores a message whose parent_id has no pending execution", () => {
     const cells = [makeCell()]
-    const pendingExecs = new Map<string, number>()
+    const pendingExecs = pendingMap([])
     const updated: number[] = []
 
     handleIopub("unknown-parent", "stream", { text: ["x"] }, cells, pendingExecs, (index) =>
@@ -138,11 +183,86 @@ describe("handleIopub", () => {
 
   test("does not notify the caller for an unrecognized message type", () => {
     const cells = [makeCell()]
-    const pendingExecs = new Map([["parent-1", 0]])
+    const pendingExecs = pendingMap([["parent-1", { index: 0, source: cells[0].source }]])
     const updated: number[] = []
 
     handleIopub("parent-1", "comm_open", {}, cells, pendingExecs, (index) => updated.push(index))
 
     expect(updated).toEqual([])
+  })
+
+  test("re-locates the running cell by source when /sync shifted its index mid-execution", () => {
+    // Cell "sleep(1)" was at index 0 when /execute captured this pending
+    // entry. Before the kernel replies, a /sync inserted a brand new cell
+    // ahead of it, so the running cell is now at index 1 and a never-run
+    // cell occupies the stale index 0.
+    const cells = [
+      makeCell({ index: 0, source: "# brand new, never executed" }),
+      makeCell({ index: 1, source: "sleep(1)" }),
+    ]
+    const pendingExecs = pendingMap([["parent-1", { index: 0, source: "sleep(1)" }]])
+    const updated: number[] = []
+
+    handleIopub(
+      "parent-1",
+      "stream",
+      { name: "stdout", text: ["done\n"] },
+      cells,
+      pendingExecs,
+      (index) => updated.push(index),
+    )
+
+    expect(cells[0].outputs).toEqual([])
+    expect(cells[1].outputs).toEqual([{ kind: "text", content: "done\n", stream: "stdout" }])
+    expect(updated).toEqual([1])
+  })
+
+  test("drops the message rather than guessing when the running cell can't be found at all", () => {
+    // The running cell was deleted entirely while its execution was still
+    // in flight - there is no safe cell to attach this output to.
+    const cells = [makeCell({ index: 0, source: "something else" })]
+    const pendingExecs = pendingMap([["parent-1", { index: 0, source: "sleep(1)" }]])
+    const updated: number[] = []
+
+    handleIopub(
+      "parent-1",
+      "stream",
+      { name: "stdout", text: ["done\n"] },
+      cells,
+      pendingExecs,
+      (index) => updated.push(index),
+    )
+
+    expect(cells[0].outputs).toEqual([])
+    expect(updated).toEqual([])
+  })
+})
+
+describe("reconcileBusyStatus", () => {
+  test("clears a stuck busy status left on a slot no pending execution resolves to", () => {
+    // Mirrors what mergeCells/syncCells produce after an insert shifts a
+    // genuinely-running cell out from under its old index: the new cell
+    // that lands on that old index inherits its "busy" marker positionally,
+    // with nothing else ever telling it that execution actually finished
+    // elsewhere.
+    const cells = [
+      makeCell({ index: 0, source: "# brand new, never executed", status: "busy" }),
+      makeCell({ index: 1, source: "sleep(1)", status: "idle" }),
+    ]
+    const pendingExecs = pendingMap([["parent-1", { index: 0, source: "sleep(1)" }]])
+
+    reconcileBusyStatus(cells, pendingExecs)
+
+    expect(cells[0].status).toBe("idle")
+    expect(cells[1].status).toBe("idle")
+  })
+
+  test("leaves a genuinely running cell's busy status alone", () => {
+    const cells = [makeCell({ status: "busy" })]
+    const pendingExecs = pendingMap([["parent-1", { index: 0, source: cells[0].source }]])
+
+    reconcileBusyStatus(cells, pendingExecs)
+
+    expect(cells[0].status).toBe("busy")
   })
 })

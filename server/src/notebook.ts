@@ -1,8 +1,9 @@
 export type CellOutput =
-  | { kind: "text"; content: string }
+  | { kind: "text"; content: string; stream?: "stdout" | "stderr" }
   | { kind: "error"; content: string }
   | { kind: "image"; data: string }
   | { kind: "html"; content: string }
+  | { kind: "latex"; content: string }
 
 export type RenderedCell = {
   index: number
@@ -33,7 +34,14 @@ export function renderOutput(output: any): CellOutput | null {
 
   if (data["text/html"]) return { kind: "html", content: joinSource(data["text/html"]) }
 
-  if (output.output_type === "stream") return { kind: "text", content: joinSource(output.text) }
+  if (data["text/latex"]) return { kind: "latex", content: joinSource(data["text/latex"]) }
+
+  if (output.output_type === "stream")
+    return {
+      kind: "text",
+      content: joinSource(output.text),
+      stream: output.name === "stderr" ? "stderr" : "stdout",
+    }
 
   if (output.output_type === "error") {
     const traceback = Array.isArray(output.traceback)
@@ -42,9 +50,35 @@ export function renderOutput(output: any): CellOutput | null {
     return { kind: "error", content: stripAnsi(traceback) }
   }
 
+  if (data["application/json"] !== undefined)
+    return { kind: "text", content: JSON.stringify(data["application/json"], null, 2) }
+
   if (data["text/plain"]) return { kind: "text", content: joinSource(data["text/plain"]) }
 
   return null
+}
+
+/**
+ * Appends `newOutput`, merging it into the previous output when both are
+ * text from the same stream - matches how nbformat itself accumulates
+ * consecutive stdout/stderr chunks into one entry rather than one entry per
+ * flush (which is otherwise how quickly-updating output like tqdm arrives).
+ */
+export function appendOutput(outputs: CellOutput[], newOutput: CellOutput): void {
+  const last = outputs[outputs.length - 1]
+
+  if (
+    last &&
+    last.kind === "text" &&
+    newOutput.kind === "text" &&
+    last.stream !== undefined &&
+    last.stream === newOutput.stream
+  ) {
+    last.content += newOutput.content
+    return
+  }
+
+  outputs.push(newOutput)
 }
 
 export function renderNotebook(nb: any): RenderedCell[] {
@@ -60,7 +94,7 @@ export function renderNotebook(nb: any): RenderedCell[] {
     if (cell.cell_type === "code" && Array.isArray(cell.outputs)) {
       for (const output of cell.outputs) {
         const rendered = renderOutput(output)
-        if (rendered) outputs.push(rendered)
+        if (rendered) appendOutput(outputs, rendered)
       }
     }
 

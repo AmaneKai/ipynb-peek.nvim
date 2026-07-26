@@ -1,5 +1,5 @@
 import { renderNotebook, mergeCells, syncCells, type RenderedCell } from "./notebook"
-import { handleIopub } from "./iopub"
+import { handleIopub, reconcileBusyStatus, type PendingExec } from "./iopub"
 
 let currentCells: RenderedCell[] = []
 let notebookKernelName: string | undefined
@@ -40,7 +40,7 @@ function emitEvent(event: any) {
 let bridgeProc: ReturnType<typeof Bun.spawn> | null = null
 let kernelReadyPromise: Promise<void> | null = null
 let kernelReadyResolve: (() => void) | null = null
-const pendingExecs = new Map<string, number>()
+const pendingExecs = new Map<string, PendingExec>()
 
 async function readLines(stream: ReadableStream<Uint8Array>, onLine: (line: string) => void) {
   const reader = stream.getReader()
@@ -204,6 +204,7 @@ export function createServer(port: number = Number(process.env.IPYNB_PEEK_PORT ?
           const nb = JSON.parse(raw)
           notebookKernelName = nb.metadata?.kernelspec?.name ?? notebookKernelName
           currentCells = mergeCells(currentCells, renderNotebook(nb))
+          reconcileBusyStatus(currentCells, pendingExecs)
           broadcastFull()
         })
       }
@@ -212,6 +213,7 @@ export function createServer(port: number = Number(process.env.IPYNB_PEEK_PORT ?
         return handleJsonRoute(async () => {
           const body: any = await req.json()
           currentCells = syncCells(currentCells, body.cells ?? [])
+          reconcileBusyStatus(currentCells, pendingExecs)
           broadcastFull()
         })
       }
@@ -228,7 +230,7 @@ export function createServer(port: number = Number(process.env.IPYNB_PEEK_PORT ?
           await ensureKernelStarted(notebookKernelName || "python3")
 
           const msgId = crypto.randomUUID()
-          pendingExecs.set(msgId, index)
+          pendingExecs.set(msgId, { index, source: currentCells[index].source })
           currentCells[index].outputs = []
           currentCells[index].status = "busy"
           currentCells[index].started_at = Date.now()

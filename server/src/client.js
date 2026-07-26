@@ -1,3 +1,7 @@
+import { AnsiUp } from "https://cdn.jsdelivr.net/npm/ansi_up@6.0.6/+esm"
+
+const ansiUp = new AnsiUp()
+
 ;(function () {
   /**
    * Tags the page title with this server instance's port, so the Neovim
@@ -24,6 +28,29 @@
     if (event.key === "Escape") closeLightbox()
   })
 
+  /**
+   * Runs after marked.js has already turned markdown into HTML, so KaTeX
+   * only ever sees plain text/HTML, never raw markdown syntax - matches how
+   * Jupyter's own markdown-it + katex renderer is ordered.
+   */
+  function renderMath(container) {
+    if (!window.renderMathInElement) return
+
+    try {
+      renderMathInElement(container, {
+        delimiters: [
+          { left: "$$", right: "$$", display: true },
+          { left: "$", right: "$", display: false },
+          { left: "\\(", right: "\\)", display: false },
+          { left: "\\[", right: "\\]", display: true },
+        ],
+        throwOnError: false,
+      })
+    } catch (error) {
+      console.error("[ipynb-peek] LaTeX rendering failed:", error)
+    }
+  }
+
   function clearCellTimer(index) {
     if (!cellTimers[index]) return
     clearInterval(cellTimers[index])
@@ -45,8 +72,18 @@
         wrap.appendChild(img)
       } else if (out.kind === "html") {
         const div = document.createElement("div")
+        div.className = "table-scroll"
         div.innerHTML = out.content
         wrap.appendChild(div)
+      } else if (out.kind === "latex") {
+        const div = document.createElement("div")
+        div.textContent = out.content
+        renderMath(div)
+        wrap.appendChild(div)
+      } else if (out.kind === "text") {
+        const pre = document.createElement("pre")
+        pre.innerHTML = ansiUp.ansi_to_html(out.content)
+        wrap.appendChild(pre)
       } else {
         const pre = document.createElement("pre")
         if (out.kind === "error") pre.className = "error-output"
@@ -77,6 +114,7 @@
       el.classList.add("md-cell")
       const content = document.createElement("div")
       content.innerHTML = marked.parse(cell.source || "")
+      renderMath(content)
       el.appendChild(content)
     } else if (cell.cell_type === "code") {
       el.classList.add("code-cell")

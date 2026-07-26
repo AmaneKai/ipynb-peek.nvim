@@ -3,9 +3,11 @@ import {
   joinSource,
   stripAnsi,
   renderOutput,
+  appendOutput,
   renderNotebook,
   mergeCells,
   syncCells,
+  type CellOutput,
 } from "./notebook"
 
 describe("joinSource", () => {
@@ -38,9 +40,14 @@ describe("renderOutput", () => {
     expect(renderOutput(output)).toEqual({ kind: "image", data: "base64data" })
   })
 
-  test("renders a stream output as text", () => {
-    const output = { output_type: "stream", text: ["hello\n"] }
-    expect(renderOutput(output)).toEqual({ kind: "text", content: "hello\n" })
+  test("renders a stream output as text, tagged with its stream name", () => {
+    const output = { output_type: "stream", name: "stdout", text: ["hello\n"] }
+    expect(renderOutput(output)).toEqual({ kind: "text", content: "hello\n", stream: "stdout" })
+  })
+
+  test("tags a stderr stream output as stderr", () => {
+    const output = { output_type: "stream", name: "stderr", text: ["uh oh\n"] }
+    expect(renderOutput(output)).toEqual({ kind: "text", content: "uh oh\n", stream: "stderr" })
   })
 
   test("renders an error output, joining and stripping ANSI from the traceback", () => {
@@ -51,6 +58,19 @@ describe("renderOutput", () => {
     expect(renderOutput(output)).toEqual({ kind: "error", content: "line one\nline two" })
   })
 
+  test("renders text/latex as a latex output", () => {
+    const output = { data: { "text/latex": "$x^2$" } }
+    expect(renderOutput(output)).toEqual({ kind: "latex", content: "$x^2$" })
+  })
+
+  test("pretty-prints application/json instead of a repr placeholder", () => {
+    const output = { data: { "application/json": { a: 1 } } }
+    expect(renderOutput(output)).toEqual({
+      kind: "text",
+      content: JSON.stringify({ a: 1 }, null, 2),
+    })
+  })
+
   test("falls back to text/plain when nothing else matches", () => {
     const output = { data: { "text/plain": ["42"] } }
     expect(renderOutput(output)).toEqual({ kind: "text", content: "42" })
@@ -58,6 +78,38 @@ describe("renderOutput", () => {
 
   test("returns null for an output with no recognizable data", () => {
     expect(renderOutput({ data: {} })).toBeNull()
+  })
+})
+
+describe("appendOutput", () => {
+  test("merges consecutive text outputs from the same stream", () => {
+    const outputs: CellOutput[] = []
+    appendOutput(outputs, { kind: "text", content: "a", stream: "stdout" })
+    appendOutput(outputs, { kind: "text", content: "b", stream: "stdout" })
+
+    expect(outputs).toEqual([{ kind: "text", content: "ab", stream: "stdout" }])
+  })
+
+  test("keeps stdout and stderr chunks as separate outputs", () => {
+    const outputs: CellOutput[] = []
+    appendOutput(outputs, { kind: "text", content: "out", stream: "stdout" })
+    appendOutput(outputs, { kind: "text", content: "err", stream: "stderr" })
+
+    expect(outputs).toEqual([
+      { kind: "text", content: "out", stream: "stdout" },
+      { kind: "text", content: "err", stream: "stderr" },
+    ])
+  })
+
+  test("does not merge a stream chunk into a preceding non-stream output", () => {
+    const outputs: CellOutput[] = []
+    appendOutput(outputs, { kind: "text", content: "42" })
+    appendOutput(outputs, { kind: "text", content: "out", stream: "stdout" })
+
+    expect(outputs).toEqual([
+      { kind: "text", content: "42" },
+      { kind: "text", content: "out", stream: "stdout" },
+    ])
   })
 })
 
@@ -86,7 +138,7 @@ describe("renderNotebook", () => {
           cell_type: "code",
           source: ["1 + 1"],
           execution_count: 3,
-          outputs: [{ output_type: "stream", text: ["2"] }],
+          outputs: [{ output_type: "stream", name: "stdout", text: ["2"] }],
         },
       ],
     }
@@ -94,7 +146,27 @@ describe("renderNotebook", () => {
     const cells = renderNotebook(notebook)
 
     expect(cells[0].execution_count).toBe(3)
-    expect(cells[0].outputs).toEqual([{ kind: "text", content: "2" }])
+    expect(cells[0].outputs).toEqual([{ kind: "text", content: "2", stream: "stdout" }])
+  })
+
+  test("merges consecutive same-stream stream outputs into one entry", () => {
+    const notebook = {
+      metadata: {},
+      cells: [
+        {
+          cell_type: "code",
+          source: ["loop"],
+          outputs: [
+            { output_type: "stream", name: "stdout", text: ["a"] },
+            { output_type: "stream", name: "stdout", text: ["b"] },
+          ],
+        },
+      ],
+    }
+
+    const cells = renderNotebook(notebook)
+
+    expect(cells[0].outputs).toEqual([{ kind: "text", content: "ab", stream: "stdout" }])
   })
 })
 

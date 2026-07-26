@@ -172,6 +172,9 @@ html, body {
 .outputs table {
   border-collapse: collapse;
 }
+.outputs .table-scroll {
+  overflow-x: auto;
+}
 .outputs td, .outputs th {
   border: 1px solid #3c3c3c;
   padding: 4px 10px;
