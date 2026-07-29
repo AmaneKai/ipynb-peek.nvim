@@ -469,10 +469,11 @@ end
 --- Keeps a persistent connection to the server's /events stream so
 --- browser-originated actions (currently just "+ Code"/"+ Markdown") can
 --- reach Neovim - the reverse of every other request in this plugin, which
---- are all Neovim POSTing out. The server caps its idle-connection timeout
---- at 255s (a hard Bun limit), so for any editing session longer than that
---- this WILL periodically drop - auto-reconnect (matching the browser's own
---- websocket reconnect-with-backoff) rather than silently going dead.
+--- are all Neovim POSTing out. The server disables its idle-connection
+--- timeout specifically so this can stay open indefinitely, but the
+--- connection can still drop for other reasons (server restart, network
+--- blip) - auto-reconnect (matching the browser's own websocket
+--- reconnect-with-backoff) rather than silently going dead.
 local function start_event_listener(bufnr)
   events_should_run = true
   if events_job then

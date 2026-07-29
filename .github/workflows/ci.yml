@@ -20,5 +20,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - run: make testserver
+      # server/dist/ is committed, not built at install time - fails if a
+      # change to server/src wasn't followed by `make build` before commit.
+      - run: make checkbuild

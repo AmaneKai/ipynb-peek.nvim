@@ -38,7 +38,7 @@ local function check_jupytext_format()
 end
 
 local function check_external_binaries()
-  for _, binary in ipairs({ "bun", "node", "curl" }) do
+  for _, binary in ipairs({ "node", "curl" }) do
     if exe(binary) then
       health.ok(binary .. " found on PATH")
     else
@@ -113,7 +113,7 @@ local function check_build_step()
       "Run the plugin's build step (e.g. `:Lazy build ipynb-peek.nvim` for lazy.nvim), "
         .. "or manually: cd "
         .. server_dir
-        .. " && bun install",
+        .. " && npm install",
     })
   end
 end

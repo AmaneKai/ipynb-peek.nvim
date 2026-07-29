@@ -1,4 +1,4 @@
-import { describe, test, expect } from "bun:test"
+import { describe, test, expect } from "vitest"
 import { createHmac } from "node:crypto"
 import { sign, buildMessage, parseFrames, DELIM } from "./wire-protocol"
 

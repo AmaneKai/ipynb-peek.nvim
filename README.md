@@ -21,8 +21,7 @@ Neovim isn't a great place to *look at* a notebook - cell outputs, images, rende
 
 - **Neovim 0.10+** (uses `vim.system`)
 - **[jupytext.vim](https://github.com/goerz/jupytext.vim)** - hard dependency. This plugin converts `.ipynb` buffers into a `# %%`-delimited Python view; ipynb-peek reads and writes that view directly. Without it, opening a `.ipynb` file just shows raw JSON and nothing here will work. See [Dependency setup](#dependency-setup) below for exact install steps.
-- **[bun](https://bun.sh)** - runs the preview server
-- **[node](https://nodejs.org)** - runs the kernel bridge (see [How it works](#how-it-works) for why this is separate from bun)
+- **[node](https://nodejs.org) 22.18+** (or 24.2+) - runs the preview server and the kernel bridge (see [How it works](#how-it-works) for why those are two processes). The 22.18/24.2 floor is for `import.meta.main`, which the server relies on.
 - **curl** - used for the Neovim-server HTTP/event channel
 - **jupyter + ipykernel**, with at least one registered kernel
 - A Chromium-based browser (Chrome, Brave, Edge, or Chromium) - optional. This is only needed for the chromeless "app mode" popup window; `--app=<url>` is a Chromium-specific flag with no real Firefox/Safari equivalent. Without one, ipynb-peek opens the preview as a normal tab in your default browser instead - everything else (live sync, execution, cell insert/delete, all of it) works identically either way, you just get browser chrome around it instead of a floating window.
@@ -39,9 +38,6 @@ Pick your OS below. After installing everything here, skip to [Installation](#in
 # Neovim, node, curl (curl ships with macOS already)
 brew install neovim node
 
-# bun
-curl -fsSL https://bun.sh/install | bash
-
 # jupyter + ipykernel
 pip3 install --user jupyter ipykernel
 
@@ -57,9 +53,6 @@ Run in PowerShell:
 # Neovim, node
 winget install Neovim.Neovim
 winget install OpenJS.NodeJS.LTS
-
-# bun
-powershell -c "irm bun.sh/install.ps1 | iex"
 
 # curl - already included on Windows 10/11; if missing:
 winget install cURL.cURL
@@ -86,9 +79,6 @@ sudo add-apt-repository ppa:neovim-ppa/unstable
 sudo apt update
 sudo apt install neovim
 
-# bun
-curl -fsSL https://bun.sh/install | bash
-
 # jupyter + ipykernel
 sudo apt install python3-pip
 pip3 install --user jupyter ipykernel
@@ -102,9 +92,6 @@ sudo apt install chromium
 ```sh
 # Neovim, curl, node
 sudo dnf install neovim curl nodejs
-
-# bun
-curl -fsSL https://bun.sh/install | bash
 
 # jupyter + ipykernel
 sudo dnf install python3-pip
@@ -122,9 +109,6 @@ sudo dnf install chromium
 # Neovim, curl, node
 sudo pacman -S neovim curl nodejs npm
 
-# bun
-curl -fsSL https://bun.sh/install | bash
-
 # jupyter + ipykernel
 sudo pacman -S python-pip
 pip install --user jupyter ipykernel
@@ -132,6 +116,9 @@ pip install --user jupyter ipykernel
 # a Chromium-based browser (skip if you already have one)
 sudo pacman -S chromium
 ```
+
+> [!NOTE]
+> Check `node --version` after installing - it needs to be 22.18+ or 24.2+ (see [Prerequisites](#prerequisites) for why). Package-manager-provided Node is usually current enough, but if yours is older (common on Debian/Ubuntu LTS releases that haven't picked up a newer major yet), install via [nvm](https://github.com/nvm-sh/nvm) or [NodeSource](https://github.com/nodesource/distributions) instead.
 
 ### jupytext.vim (all platforms)
 
@@ -156,7 +143,7 @@ This is a Neovim plugin, not a system package - install it the same way regardle
 ```lua
 {
   "AmaneKai/ipynb-peek.nvim",
-  build = "cd server && bun install",
+  build = "cd server && npm install",
   -- event, not just cmd: loads as soon as you open a .ipynb file, so the
   -- default keymaps (<leader>jo etc.) work without typing a command first.
   -- jupytext.vim reads .ipynb via BufReadCmd, which suppresses the normal
@@ -185,7 +172,7 @@ This is a Neovim plugin, not a system package - install it the same way regardle
 ```lua
 use({
   "AmaneKai/ipynb-peek.nvim",
-  run = "cd server && bun install",
+  run = "cd server && npm install",
   event = { "BufEnter *.ipynb", "BufWinEnter *.ipynb" },
   cmd = {
     "IpynbPeekOpen",
@@ -205,7 +192,7 @@ use({
 ### vim-plug
 
 ```vim
-Plug 'AmaneKai/ipynb-peek.nvim', { 'do': 'cd server && bun install' }
+Plug 'AmaneKai/ipynb-peek.nvim', { 'do': 'cd server && npm install' }
 ```
 
 Then in your Lua config:
@@ -219,7 +206,7 @@ require("ipynb-peek").setup()
 Whatever manager you use, the build step is the same shell command run from wherever the plugin was installed:
 
 ```sh
-cd <plugin-install-dir>/server && bun install
+cd <plugin-install-dir>/server && npm install
 ```
 
 If your plugin manager's automatic build hook doesn't fire (or you deleted `server/node_modules` and need to reinstall), run this manually. `:checkhealth ipynb-peek` will tell you if this step is missing.
@@ -295,13 +282,15 @@ Override or disable any of these via `setup({ keymaps = { ... } })` - see [Confi
 
 Opening a `.ipynb` file with jupytext.vim active converts the buffer into a `# %%`-delimited Python view, not raw notebook JSON - ipynb-peek's own cell parser reads and writes that view directly for everything except the authoritative full re-render on save (which reads the real `.ipynb` JSON jupytext writes to disk).
 
-A Bun server handles the HTTP/WebSocket connection to the preview page. Actually running code needs to speak the real Jupyter wire protocol over ZeroMQ to an `ipykernel` process - but Bun's runtime currently crashes when the native `zeromq` binding loads ([a known upstream limitation](https://github.com/oven-sh/bun/issues/18546)), so a small Node.js child process owns that connection instead, relaying messages to the Bun server over stdio. This is why both `bun` and `node` are required, not just one.
+A Node server handles the HTTP/WebSocket connection to the preview page. Actually running code needs to speak the real Jupyter wire protocol over ZeroMQ to an `ipykernel` process; that connection is owned by a *separate* Node child process (`kernel-bridge.mjs`) rather than folded into the main server, relaying messages over stdio - so a crash while managing kernel execution can never take down the live preview/render/sync path. Two processes, same runtime.
+
+`server/dist/` (what actually runs) is a prebuilt, committed-to-the-repo bundle - `npm install` only needs to fetch `zeromq`'s native binding and `ws`; there's no TypeScript build step on your end.
 
 ## Troubleshooting
 
 **Nothing happens when I run a cell / open the preview / do anything at all, with no error.** Almost always `vim.g.jupytext_fmt` isn't set to a percent format - see the callout under [Prerequisites](#prerequisites). Run `:checkhealth ipynb-peek`, which checks this specifically.
 
-**Why is there both a `bun` and a `node` process running?** See [How it works](#how-it-works) above - this is expected, not a bug.
+**Why are there two `node` processes running?** See [How it works](#how-it-works) above - the server and the kernel bridge are kept as separate processes on purpose, for fault isolation. Expected, not a bug.
 
 **My kernel isn't seeing a package I just installed (`pip install` / `uv pip install`).** A running kernel process doesn't pick up newly installed packages. Run `:IpynbPeekRestartKernel` after installing something new into the notebook's venv.
 
@@ -309,23 +298,25 @@ A Bun server handles the HTTP/WebSocket connection to the preview page. Actually
 
 **The preview popup doesn't close when I close the notebook.** This is a best-effort feature and its reliability varies by platform - macOS needs Automation permission granted to your terminal/Neovim; Linux needs `xdotool` or `wmctrl` installed; Windows support is newer and less tested. Run `:checkhealth ipynb-peek` to see what's missing. The server itself always stops correctly regardless.
 
-**Something's not working and I don't know why.** Run `:checkhealth ipynb-peek` first - this plugin has a larger-than-usual set of external dependencies (jupytext.vim, bun, node, jupyter/ipykernel, a browser, curl), and the health check is the fastest way to find out which one is the problem.
+**Something's not working and I don't know why.** Run `:checkhealth ipynb-peek` first - this plugin has a larger-than-usual set of external dependencies (jupytext.vim, node, jupyter/ipykernel, a browser, curl), and the health check is the fastest way to find out which one is the problem.
 
 **`server/node_modules missing` in `:checkhealth`.** The build step hasn't run. For lazy.nvim, run `:Lazy build ipynb-peek.nvim`; otherwise run the manual install command from [Installation](#installation) above.
 
 ## Development
 
-There are two test suites - one for the Lua plugin, one for the Bun server:
+There are two test suites - one for the Lua plugin, one for the Node server:
 
 ```sh
 make test        # both
 make testlua      # lua/ - plenary.nvim, headless Neovim
-make testserver   # server/ - bun test
+make testserver   # server/ - vitest
 ```
 
 `make testlua` vendors a throwaway `plenary.nvim` clone into `.tests/` (gitignored) if one isn't already on your machine, so it works the same locally and in CI. Both suites run on every push/PR via GitHub Actions (`.github/workflows/ci.yml`).
 
-The Lua tests cover `cells.lua`'s buffer parsing directly against real scratch buffers, plus `status.lua`'s pure icon/virtual-text formatting for the in-buffer status signs. The server tests cover the pure notebook-rendering/merge/sync logic (`notebook.ts`), the Jupyter iopub message handling (`iopub.ts`), the wire-protocol framing (`wire-protocol.mjs`), and the HTTP routing layer against a real server instance on a random port. Deliberately not covered by CI: anything that needs a live Jupyter kernel or a real browser popup - those are exercised by hand against a real kernel before a release, not automated.
+The Lua tests cover `cells.lua`'s buffer parsing directly against real scratch buffers, plus `status.lua`'s pure icon/virtual-text formatting for the in-buffer status signs. The server tests cover the pure notebook-rendering/merge/sync logic (`notebook.ts`), the Jupyter iopub message handling (`iopub.ts`), the wire-protocol framing (`wire-protocol.mjs`), and the HTTP/WebSocket routing layer (including a real `/ws` connection) against a real server instance on a random port. Deliberately not covered by CI: anything that needs a live Jupyter kernel or a real browser popup - those are exercised by hand against a real kernel before a release, not automated.
+
+`server/dist/` is committed to the repo, not generated at install time - after changing anything in `server/src`, run `make build` and commit the result. `make checkbuild` (also run in CI) fails if a rebuild was needed but forgotten.
 
 ## License
 

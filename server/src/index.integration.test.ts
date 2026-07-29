@@ -1,25 +1,28 @@
-import { describe, test, expect, beforeAll, afterAll } from "bun:test"
+import { describe, test, expect, beforeAll, afterAll } from "vitest"
+import { WebSocket } from "ws"
 import { createServer } from "./index"
 
 /**
- * Exercises the HTTP routing/response-shape layer against a real Bun server
- * instance on a random port. Deliberately stays clear of /execute's happy
- * path and /restart, since both touch the real kernel-bridge child process -
- * that path is covered by manual testing against a live Jupyter kernel, not
- * CI.
+ * Exercises the HTTP routing/response-shape layer against a real Node
+ * server instance on a random port. Deliberately stays clear of /execute's
+ * happy path and /restart, since both touch the real kernel-bridge child
+ * process - that path is covered by manual testing against a live Jupyter
+ * kernel, not CI.
  */
 
-let server: ReturnType<typeof createServer>
+let server: Awaited<ReturnType<typeof createServer>>
 let baseUrl: string
+let wsUrl: string
 
 async function readOk(response: Response): Promise<boolean> {
   const body = (await response.json()) as { ok: boolean }
   return body.ok
 }
 
-beforeAll(() => {
-  server = createServer(0)
+beforeAll(async () => {
+  server = await createServer(0)
   baseUrl = `http://127.0.0.1:${server.port}`
+  wsUrl = `ws://127.0.0.1:${server.port}/ws`
 })
 
 afterAll(() => {
@@ -102,6 +105,58 @@ describe("POST /cursor", () => {
       body: JSON.stringify({ index: 0 }),
     })
     expect(await readOk(response)).toBe(true)
+  })
+})
+
+describe("GET /ws", () => {
+  /**
+   * Queues every message from the moment the socket is constructed, rather
+   * than attaching a one-off listener after awaiting "open" - the server
+   * sends its initial payload synchronously on connect, so a listener
+   * attached only after "open" resolves can lose it to exactly this race
+   * (confirmed directly: an earlier version of this test attached the
+   * listener late and hung forever waiting for a message that had already
+   * fired with nobody listening).
+   */
+  function connect(url: string) {
+    const ws = new WebSocket(url)
+    const queue: any[] = []
+    const waiters: Array<(msg: any) => void> = []
+
+    ws.on("message", (data) => {
+      const parsed = JSON.parse(data.toString())
+      const waiter = waiters.shift()
+      if (waiter) waiter(parsed)
+      else queue.push(parsed)
+    })
+
+    return {
+      ws,
+      ready: new Promise<void>((resolve) => ws.once("open", () => resolve())),
+      nextMessage(): Promise<any> {
+        const queued = queue.shift()
+        if (queued !== undefined) return Promise.resolve(queued)
+        return new Promise((resolve) => waiters.push(resolve))
+      },
+    }
+  }
+
+  test("sends the initial render payload on connect, then broadcasts /cursor updates", async () => {
+    const { ws, ready, nextMessage } = connect(wsUrl)
+    await ready
+
+    const initial = await nextMessage()
+    expect(initial.type).toBe("render")
+
+    const broadcastReceived = nextMessage()
+    await fetch(`${baseUrl}/cursor`, {
+      method: "POST",
+      body: JSON.stringify({ index: 3 }),
+    })
+    const cursorEvent = await broadcastReceived
+    expect(cursorEvent).toEqual({ type: "cursor", index: 3 })
+
+    ws.close()
   })
 })
 

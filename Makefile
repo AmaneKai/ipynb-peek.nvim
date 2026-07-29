@@ -1,6 +1,6 @@
 PLENARY_DIR := .tests/plenary.nvim
 
-.PHONY: test testdeps testlua testserver
+.PHONY: test testdeps testlua testserver build checkbuild
 
 testdeps:
 	@if [ ! -d $(PLENARY_DIR) ]; then \
@@ -12,6 +12,15 @@ testlua: testdeps
 		-c "PlenaryBustedDirectory tests/ { minimal_init = 'tests/minimal_init.lua' }"
 
 testserver:
-	cd server && bun install --frozen-lockfile && bun test
+	cd server && npm ci && npm test
 
 test: testlua testserver
+
+build:
+	cd server && npm run build
+
+# server/dist/ is committed, not generated at install time (see
+# server/build.mjs) - this catches a rebuild that was forgotten before a
+# commit touching server/src.
+checkbuild: build
+	git diff --exit-code server/dist

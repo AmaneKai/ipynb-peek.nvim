@@ -14,7 +14,8 @@ local function get_free_port()
   return sockname.port
 end
 
---- Starts the bun render server if not already running.
+--- Starts the render server (a prebuilt dist/index.js, committed to the
+--- repo - see server/build.mjs) if not already running.
 --- opts.server_dir: absolute path to the `server/` directory (contains package.json).
 function M.start(opts)
   if job_id then
@@ -25,7 +26,7 @@ function M.start(opts)
   M.url = nil
   M.ready = false
 
-  job_id = vim.fn.jobstart({ "bun", "run", "src/index.ts" }, {
+  job_id = vim.fn.jobstart({ "node", "dist/index.js" }, {
     cwd = opts.server_dir,
     env = { IPYNB_PEEK_PORT = tostring(M.port) },
     stdout_buffered = false,
