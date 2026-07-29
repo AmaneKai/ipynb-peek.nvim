@@ -63,6 +63,28 @@ describe("cells.cell_index_at", function()
   end)
 end)
 
+describe("cells.cell_after", function()
+  it("returns the cell right after the given 0-based index", function()
+    local bufnr = make_buffer({ "# %%", "1 + 1", "# %%", "2 + 2", "# %%", "3 + 3" })
+    local parsed = cells.parse(bufnr)
+
+    local next_cell = cells.cell_after(parsed, 0)
+
+    assert.are.same(parsed[2], next_cell)
+  end)
+
+  it("returns nil for the last cell", function()
+    local bufnr = make_buffer({ "# %%", "1 + 1", "# %%", "2 + 2" })
+    local parsed = cells.parse(bufnr)
+
+    assert.is_nil(cells.cell_after(parsed, 1))
+  end)
+
+  it("returns nil for an empty cell list", function()
+    assert.is_nil(cells.cell_after({}, 0))
+  end)
+end)
+
 describe("cells.source", function()
   it("excludes the `# %%` marker line itself", function()
     local bufnr = make_buffer({ "# %%", "1 + 1", "2 + 2" })

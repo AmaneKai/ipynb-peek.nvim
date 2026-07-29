@@ -9,7 +9,7 @@
  */
 import { Dealer, Subscriber } from "zeromq"
 import { randomUUID } from "node:crypto"
-import { writeFileSync, mkdtempSync } from "node:fs"
+import { writeFileSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { spawn } from "node:child_process"
@@ -61,6 +61,21 @@ const SESSION = randomUUID()
 let shell = null
 let iopub = null
 let kernelProcess = null
+let connectionDir = null
+
+/**
+ * The connection file holds the HMAC signing key in plaintext - without
+ * this, every kernel start (including every /restart) leaves its
+ * ipynb-peek-kernel-* dir behind under the OS tmp dir forever, since nothing
+ * else ever removes it.
+ */
+function cleanupConnectionDir() {
+  if (!connectionDir) return
+  try {
+    rmSync(connectionDir, { recursive: true, force: true })
+  } catch {}
+  connectionDir = null
+}
 
 function spawnOnce(argv, cwd) {
   return new Promise((resolve, reject) => {
@@ -101,7 +116,7 @@ async function start(kernelName, cwd) {
     signature_scheme: "hmac-sha256",
     kernel_name: kernelName,
   }
-  const connectionDir = mkdtempSync(join(tmpdir(), "ipynb-peek-kernel-"))
+  connectionDir = mkdtempSync(join(tmpdir(), "ipynb-peek-kernel-"))
   const connFile = join(connectionDir, "connection.json")
   writeFileSync(connFile, JSON.stringify(connInfo))
 
@@ -109,7 +124,10 @@ async function start(kernelName, cwd) {
   const argv = argvTemplate.map((entry) => entry.replace("{connection_file}", connFile))
 
   kernelProcess = await spawnKernelProcess(argv, cwd)
-  kernelProcess.on("exit", (code) => emit({ type: "kernel_exit", code }))
+  kernelProcess.on("exit", (code) => {
+    cleanupConnectionDir()
+    emit({ type: "kernel_exit", code })
+  })
   kernelProcess.on("error", (error) =>
     emit({ type: "error", message: "kernel process error: " + error.message }),
   )
@@ -185,6 +203,32 @@ async function execute(id, code) {
 }
 
 /**
+ * SIGINT is ipykernel's default `interrupt_mode` ("signal") - its own
+ * execution loop catches KeyboardInterrupt and reports it back over iopub
+ * as a normal error message for whatever execute_request was in flight, so
+ * no extra bookkeeping is needed here. Windows has no real POSIX signals -
+ * child_process.kill("SIGINT") there unconditionally terminates the
+ * process instead of interrupting it, which would leave this bridge alive
+ * but pointing at a dead kernel (unlike shutdown/restart, nothing here
+ * clears kernelProcess or respawns it), so a subsequent /execute would hang
+ * forever waiting on a kernel that's gone. Refuse rather than risk that.
+ */
+function interrupt() {
+  if (process.platform === "win32") {
+    emit({
+      type: "error",
+      message: "interrupt is not supported on Windows yet - use :IpynbPeekRestartKernel instead",
+    })
+    return
+  }
+  try {
+    kernelProcess?.kill("SIGINT")
+  } catch (error) {
+    emit({ type: "error", message: "failed to interrupt kernel: " + String(error?.stack || error) })
+  }
+}
+
+/**
  * Without this, killing this bridge process (e.g. via /restart, or the Bun
  * server shutting down) orphans the actual Python ipykernel child.
  */
@@ -192,6 +236,9 @@ function shutdown() {
   try {
     kernelProcess?.kill()
   } catch {}
+  // Don't rely on kernelProcess's async "exit" handler for this - process.exit
+  // below wouldn't reliably wait for it to fire first.
+  cleanupConnectionDir()
   process.exit(0)
 }
 process.on("SIGTERM", shutdown)
@@ -215,8 +262,10 @@ rl.on("line", async (line) => {
   try {
     if (msg.cmd === "start") await start(msg.kernel_name || "python3", msg.cwd)
     else if (msg.cmd === "execute") await execute(msg.id, msg.code)
+    else if (msg.cmd === "interrupt") interrupt()
     else if (msg.cmd === "shutdown") {
       kernelProcess?.kill()
+      cleanupConnectionDir()
       process.exit(0)
     }
   } catch (error) {

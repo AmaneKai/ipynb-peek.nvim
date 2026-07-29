@@ -41,6 +41,13 @@ function M.cell_index_at(parsed, line)
   return nil
 end
 
+--- Returns the cell right after the 0-based `index` (matching cell_index_at's
+--- convention), or nil if `index` refers to the last cell. Used to find
+--- where to land the cursor after "run cell and advance".
+function M.cell_after(parsed, index)
+  return parsed[index + 2]
+end
+
 --- Extracts a cell's body source, excluding the `# %%` marker line itself.
 function M.source(bufnr, cell)
   local lines = vim.api.nvim_buf_get_lines(bufnr, cell.start_line, cell.end_line, false)

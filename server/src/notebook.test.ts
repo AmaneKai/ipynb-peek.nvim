@@ -9,6 +9,7 @@ import {
   syncCells,
   toNbformatOutput,
   patchNotebookOutputs,
+  cellStatusInfo,
   type CellOutput,
   type RenderedCell,
 } from "./notebook"
@@ -346,5 +347,61 @@ describe("patchNotebookOutputs", () => {
 
     expect(notebookJson.cells[0].outputs).toEqual([])
     expect(notebookJson.cells[0].execution_count).toBeNull()
+  })
+})
+
+describe("cellStatusInfo", () => {
+  function makeCell(overrides: Partial<RenderedCell> = {}): RenderedCell {
+    return { index: 0, cell_type: "code", source: "1 + 1", outputs: [], ...overrides }
+  }
+
+  test("reports busy status while a cell is executing", () => {
+    const info = cellStatusInfo(makeCell({ status: "busy" }), 2)
+    expect(info).toEqual({
+      index: 2,
+      status: "busy",
+      execution_count: undefined,
+      duration_ms: undefined,
+      has_error: false,
+    })
+  })
+
+  test("reports has_error true when the last output is an error, alongside its execution_count", () => {
+    const info = cellStatusInfo(
+      makeCell({
+        status: "idle",
+        execution_count: 3,
+        outputs: [{ kind: "error", content: "boom" }],
+      }),
+      0,
+    )
+    expect(info.has_error).toBe(true)
+    expect(info.execution_count).toBe(3)
+  })
+
+  test("reports has_error false with an execution_count for a successful run", () => {
+    const info = cellStatusInfo(
+      makeCell({
+        status: "idle",
+        execution_count: 1,
+        duration_ms: 250,
+        outputs: [{ kind: "text", content: "2" }],
+      }),
+      0,
+    )
+    expect(info.has_error).toBe(false)
+    expect(info.execution_count).toBe(1)
+    expect(info.duration_ms).toBe(250)
+  })
+
+  test("reports a null execution_count and no error for a cell that's never been run", () => {
+    const info = cellStatusInfo(makeCell({ execution_count: null }), 0)
+    expect(info.execution_count).toBeNull()
+    expect(info.has_error).toBe(false)
+  })
+
+  test("uses the index parameter rather than the cell's own (possibly stale) index field", () => {
+    const info = cellStatusInfo(makeCell({ index: 9 }), 3)
+    expect(info.index).toBe(3)
   })
 })

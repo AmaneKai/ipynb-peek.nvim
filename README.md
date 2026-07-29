@@ -9,6 +9,9 @@ Neovim isn't a great place to *look at* a notebook - cell outputs, images, rende
 - **Live preview, not render-on-save.** Every keystroke - code or markdown - updates the popup immediately (debounced, not literally per-character), the same live feeling as `peek.nvim` gives you for plain markdown, but for full notebooks.
 - **Cursor-following scroll-sync.** Move around your buffer in normal mode and the preview scrolls to keep the matching cell in view.
 - **Real code execution.** `:IpynbPeekRunCell` / `:IpynbPeekRunAll` run against an actual `ipykernel` process - the notebook's own kernel, in its own venv, with its own working directory (relative paths like `../data/foo.csv` resolve exactly like they would in Jupyter or VS Code). Output streams in live, cell by cell, with a running execution timer while it's working and a final "ran in 1.2s" once it's done.
+- **Run cell and advance.** `:IpynbPeekRunCellAndAdvance` (VS Code's Shift+Enter) runs the current cell and moves your cursor straight to the next one.
+- **In-buffer status, not just in the popup.** Every cell's `# %%` marker line gets a sign-column icon (● busy, ✓ success, ✗ error) plus `[n] 1.2s` virtual text - so you know a cell finished or errored without ever looking away from the buffer you're typing in. Toggle with `inline_status`.
+- **Interrupt, not just restart.** `:IpynbPeekInterruptKernel` stops whatever's currently running (`SIGINT`, same as Jupyter's own interrupt) without killing the kernel - your variables and imports survive, unlike a full restart.
 - **Cell insert/delete from the preview.** Hover between cells for "+ Code" / "+ Markdown" buttons, or hover a cell for a delete button - both land as real edits in your Neovim buffer (a genuine `# %%` block gets inserted or removed), not something trapped in the browser.
 - **Click-to-zoom images.** Plot output too small to read? Click it for a full-size overlay.
 - **Kernel restart on demand**, for the moment you `pip install`/`uv pip install` something new and the running kernel hasn't picked it up yet.
@@ -160,7 +163,15 @@ This is a Neovim plugin, not a system package - install it the same way regardle
   -- BufReadPre/BufReadPost/BufNewFile firing for that read - BufEnter is
   -- what reliably fires instead.
   event = { "BufEnter *.ipynb", "BufWinEnter *.ipynb" },
-  cmd = { "IpynbPeekOpen", "IpynbPeekClose", "IpynbPeekRunCell", "IpynbPeekRunAll", "IpynbPeekRestartKernel" },
+  cmd = {
+    "IpynbPeekOpen",
+    "IpynbPeekClose",
+    "IpynbPeekRunCell",
+    "IpynbPeekRunCellAndAdvance",
+    "IpynbPeekRunAll",
+    "IpynbPeekRestartKernel",
+    "IpynbPeekInterruptKernel",
+  },
   config = function()
     require("ipynb-peek").setup({
       -- see Configuration below
@@ -176,7 +187,15 @@ use({
   "AmaneKai/ipynb-peek.nvim",
   run = "cd server && bun install",
   event = { "BufEnter *.ipynb", "BufWinEnter *.ipynb" },
-  cmd = { "IpynbPeekOpen", "IpynbPeekClose", "IpynbPeekRunCell", "IpynbPeekRunAll", "IpynbPeekRestartKernel" },
+  cmd = {
+    "IpynbPeekOpen",
+    "IpynbPeekClose",
+    "IpynbPeekRunCell",
+    "IpynbPeekRunCellAndAdvance",
+    "IpynbPeekRunAll",
+    "IpynbPeekRestartKernel",
+    "IpynbPeekInterruptKernel",
+  },
   config = function()
     require("ipynb-peek").setup()
   end,
@@ -225,6 +244,10 @@ require("ipynb-peek").setup({
   window = { width = 900, height = 1000 },
   position = { x = 40, y = 40 },
 
+  -- Sign-column icon + "[n] 1.2s" virtual text on each cell's marker line
+  -- showing its execution status. Set to false if you find it noisy.
+  inline_status = true,
+
   -- Keymaps, buffer-local, set as soon as you open a .ipynb file (not just
   -- after the preview is running). Set any entry to `false` to disable it -
   -- the corresponding command keeps working either way.
@@ -232,8 +255,10 @@ require("ipynb-peek").setup({
     open = "<leader>jo",
     close = "<leader>jc",
     run_cell = "<leader>jr",
+    run_cell_advance = "<leader>jn",
     run_all = "<leader>jR",
     restart_kernel = "<leader>jK",
+    interrupt_kernel = "<leader>ji",
   },
 })
 ```
@@ -245,8 +270,10 @@ require("ipynb-peek").setup({
 | `:IpynbPeekOpen` | Start the preview server and popup for the current notebook |
 | `:IpynbPeekClose` | Stop the server (and best-effort close the popup) |
 | `:IpynbPeekRunCell` | Run the code cell under the cursor |
+| `:IpynbPeekRunCellAndAdvance` | Run the current cell and move the cursor to the next one |
 | `:IpynbPeekRunAll` | Run every code cell, top to bottom, in order |
-| `:IpynbPeekRestartKernel` | Kill and restart the kernel |
+| `:IpynbPeekRestartKernel` | Kill and restart the kernel (loses all variables/state) |
+| `:IpynbPeekInterruptKernel` | Stop whatever's currently running, keeping the kernel's state intact - POSIX only, see [Troubleshooting](#troubleshooting) |
 
 ## Default keymaps
 
@@ -257,8 +284,10 @@ Buffer-local, set as soon as you open a `.ipynb` file:
 | `<leader>jo` | Open preview |
 | `<leader>jc` | Close preview |
 | `<leader>jr` | Run cell under cursor |
+| `<leader>jn` | Run cell and advance to the next one |
 | `<leader>jR` | Run all cells |
 | `<leader>jK` | Restart kernel |
+| `<leader>ji` | Interrupt kernel |
 
 Override or disable any of these via `setup({ keymaps = { ... } })` - see [Configuration](#configuration).
 
@@ -275,6 +304,8 @@ A Bun server handles the HTTP/WebSocket connection to the preview page. Actually
 **Why is there both a `bun` and a `node` process running?** See [How it works](#how-it-works) above - this is expected, not a bug.
 
 **My kernel isn't seeing a package I just installed (`pip install` / `uv pip install`).** A running kernel process doesn't pick up newly installed packages. Run `:IpynbPeekRestartKernel` after installing something new into the notebook's venv.
+
+**`:IpynbPeekInterruptKernel` says interrupt isn't supported.** Windows has no real POSIX signals - sending one would silently kill the kernel process rather than interrupt it, leaving the plugin unable to recover without a manual restart. Rather than risk that, it refuses on Windows and tells you to use `:IpynbPeekRestartKernel` instead (loses kernel state, unlike a real interrupt). Interrupt works normally on macOS/Linux.
 
 **The preview popup doesn't close when I close the notebook.** This is a best-effort feature and its reliability varies by platform - macOS needs Automation permission granted to your terminal/Neovim; Linux needs `xdotool` or `wmctrl` installed; Windows support is newer and less tested. Run `:checkhealth ipynb-peek` to see what's missing. The server itself always stops correctly regardless.
 
@@ -294,7 +325,7 @@ make testserver   # server/ - bun test
 
 `make testlua` vendors a throwaway `plenary.nvim` clone into `.tests/` (gitignored) if one isn't already on your machine, so it works the same locally and in CI. Both suites run on every push/PR via GitHub Actions (`.github/workflows/ci.yml`).
 
-The Lua tests cover `cells.lua`'s buffer parsing directly against real scratch buffers. The server tests cover the pure notebook-rendering/merge/sync logic (`notebook.ts`), the Jupyter iopub message handling (`iopub.ts`), the wire-protocol framing (`wire-protocol.mjs`), and the HTTP routing layer against a real server instance on a random port. Deliberately not covered by CI: anything that needs a live Jupyter kernel or a real browser popup - those are exercised by hand against a real kernel before a release, not automated.
+The Lua tests cover `cells.lua`'s buffer parsing directly against real scratch buffers, plus `status.lua`'s pure icon/virtual-text formatting for the in-buffer status signs. The server tests cover the pure notebook-rendering/merge/sync logic (`notebook.ts`), the Jupyter iopub message handling (`iopub.ts`), the wire-protocol framing (`wire-protocol.mjs`), and the HTTP routing layer against a real server instance on a random port. Deliberately not covered by CI: anything that needs a live Jupyter kernel or a real browser popup - those are exercised by hand against a real kernel before a release, not automated.
 
 ## License
 

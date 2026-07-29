@@ -4,6 +4,7 @@ local server = require("ipynb-peek.server")
 local client = require("ipynb-peek.client")
 local cells = require("ipynb-peek.cells")
 local browser = require("ipynb-peek.browser")
+local status = require("ipynb-peek.status")
 
 --- Resolves the plugin's own install root from where this file was loaded,
 --- so server_dir needs no configuration regardless of which plugin manager
@@ -24,12 +25,15 @@ M.config = {
   sync_debounce_ms = 150,
   window = { width = 900, height = 1000 },
   position = { x = 40, y = 40 },
+  inline_status = true,
   keymaps = {
     open = "<leader>jo",
     close = "<leader>jc",
     run_cell = "<leader>jr",
+    run_cell_advance = "<leader>jn",
     run_all = "<leader>jR",
     restart_kernel = "<leader>jK",
+    interrupt_kernel = "<leader>ji",
   },
 }
 
@@ -153,8 +157,29 @@ local function require_server_ready()
   return false
 end
 
---- Runs the code cell under the cursor in the live kernel.
-function M.run_cell()
+--- Moves the cursor to the first body line of the cell right after `index`
+--- (0-based) in `parsed`, if one exists - clamped to the buffer's actual
+--- line count in case that cell is just a bare marker line with no body yet.
+--- Used by run_cell(true) to advance immediately after firing /execute,
+--- rather than waiting on the async HTTP response - matching VS Code's
+--- Shift+Enter, which moves on before the cell has finished running.
+local function advance_to_next_cell(bufnr, parsed, index)
+  local next_cell = cells.cell_after(parsed, index)
+  if not next_cell then
+    return
+  end
+  local win = vim.fn.bufwinid(bufnr)
+  if win == -1 then
+    return
+  end
+  local target_line = math.min(next_cell.start_line + 1, vim.api.nvim_buf_line_count(bufnr))
+  vim.api.nvim_win_set_cursor(win, { target_line, 0 })
+end
+
+--- Runs the code cell under the cursor in the live kernel. When `advance` is
+--- true, also moves the cursor to the next cell right after firing the
+--- request (VS Code's Shift+Enter); with no next cell, stays put.
+function M.run_cell(advance)
   if not require_server_ready() then
     return
   end
@@ -188,6 +213,16 @@ function M.run_cell()
       end
     end
   )
+  if advance then
+    advance_to_next_cell(bufnr, parsed, index)
+  end
+end
+
+--- Runs the code cell under the cursor and moves to the next cell - bound
+--- to a separate keymap so `M.run_cell()` on its own keeps its non-moving
+--- behavior for anyone already relying on it.
+function M.run_cell_and_advance()
+  M.run_cell(true)
 end
 
 --- Runs every code cell in the buffer, top to bottom. Requests are chained
@@ -252,6 +287,25 @@ function M.restart_kernel()
       vim.notify("[ipynb-peek] kernel restarted", vim.log.levels.INFO)
     else
       vim.notify("[ipynb-peek] restart error: " .. tostring(decoded.error), vim.log.levels.ERROR)
+    end
+  end)
+end
+
+--- Sends SIGINT to the running kernel process without killing it - unlike
+--- restart_kernel, in-memory state (variables, imports) survives. The
+--- interrupted cell reports its own KeyboardInterrupt traceback over iopub
+--- like any other error, so no success notification is needed here; only
+--- report the rare case where the request itself couldn't be delivered.
+function M.interrupt_kernel()
+  if not require_server_ready() then
+    return
+  end
+  client.request(server.port, "/interrupt", "{}", nil, function(decoded)
+    if not decoded.ok then
+      vim.notify(
+        "[ipynb-peek] interrupt error: " .. tostring(decoded.error),
+        vim.log.levels.ERROR
+      )
     end
   end)
 end
@@ -321,6 +375,58 @@ end
 local events_job = nil
 local events_should_run = false
 
+local status_ns = vim.api.nvim_create_namespace("ipynb-peek-status")
+
+--- Sets (or clears) the sign-column icon + virtual text on the marker line
+--- of the cell at `status_info.index` (0-based), reflecting its current
+--- execution status. Uses an explicit extmark `id` derived from the index
+--- so re-applying the same cell's status updates the mark in place rather
+--- than leaking a new one each time.
+---
+--- If the buffer has changed since this event was queued (cell
+--- inserted/deleted/reordered), `status_info.index` may no longer point at
+--- the right cell - rather than guess, this just skips the update; the
+--- next full /sync (already debounced ~150ms after any edit) sends a bulk
+--- cells_status event that clears and reapplies everything, so a stale
+--- single-cell update self-heals quickly, same shape as the busy-status
+--- reconciliation already done server-side.
+local function apply_cell_status(bufnr, status_info)
+  if not M.config.inline_status then
+    return
+  end
+  local parsed = cells.parse(bufnr)
+  local cell = parsed[status_info.index + 1]
+  if not cell then
+    return
+  end
+
+  local icon = status.icon_for(status_info)
+  if not icon then
+    vim.api.nvim_buf_del_extmark(bufnr, status_ns, status_info.index + 1)
+    return
+  end
+
+  vim.api.nvim_buf_set_extmark(bufnr, status_ns, cell.start_line - 1, 0, {
+    id = status_info.index + 1,
+    sign_text = icon.sign_text,
+    sign_hl_group = icon.hl_group,
+    virt_text = { { status.virt_text_for(status_info), "Comment" } },
+  })
+end
+
+--- Bulk counterpart to apply_cell_status, used for a full render/sync/
+--- restart - clears every existing mark first so a shrunk or reordered
+--- cell list never leaves a stale sign behind on the wrong line.
+local function apply_cells_status(bufnr, cells_status)
+  if not M.config.inline_status then
+    return
+  end
+  vim.api.nvim_buf_clear_namespace(bufnr, status_ns, 0, -1)
+  for _, status_info in ipairs(cells_status) do
+    apply_cell_status(bufnr, status_info)
+  end
+end
+
 --- Applies one line of /events output as a buffer edit. Split out of
 --- start_event_listener's on_stdout callback purely to keep nesting shallow -
 --- this used to be five levels deep inside that callback.
@@ -348,6 +454,14 @@ local function handle_event_line(bufnr, line)
   elseif decoded.type == "delete_cell" then
     vim.schedule(function()
       delete_cell_at(bufnr, decoded.index)
+    end)
+  elseif decoded.type == "cell_status" then
+    vim.schedule(function()
+      apply_cell_status(bufnr, decoded)
+    end)
+  elseif decoded.type == "cells_status" then
+    vim.schedule(function()
+      apply_cells_status(bufnr, decoded.cells)
     end)
   end
 end
@@ -400,8 +514,13 @@ local KEYMAP_ACTIONS = {
   open = { fn = function() M.open() end, desc = "ipynb-peek: open preview" },
   close = { fn = function() M.close() end, desc = "ipynb-peek: close preview" },
   run_cell = { fn = M.run_cell, desc = "ipynb-peek: run cell" },
+  run_cell_advance = {
+    fn = M.run_cell_and_advance,
+    desc = "ipynb-peek: run cell and advance",
+  },
   run_all = { fn = M.run_all, desc = "ipynb-peek: run all cells" },
   restart_kernel = { fn = M.restart_kernel, desc = "ipynb-peek: restart kernel" },
+  interrupt_kernel = { fn = M.interrupt_kernel, desc = "ipynb-peek: interrupt kernel" },
 }
 
 --- Sets each default (or user-overridden) keymap from M.config.keymaps,
@@ -430,10 +549,45 @@ vim.api.nvim_create_autocmd({ "BufEnter", "BufWinEnter" }, {
   end,
 })
 
+--- Tracks which buffer the currently-open preview belongs to, so a second
+--- M.open() on that same buffer (fat-fingering :IpynbPeekOpen twice, or
+--- triggering it again before the first call's async wait_ready finished)
+--- doesn't spawn a second popup window on top of the first - browser.open
+--- has no "only one" guard of its own, it launches a new one unconditionally
+--- every time it's called. Reset to nil in M.close(). There's no reliable
+--- cross-platform way to detect the user closing the popup window itself
+--- (see browser.lua) rather than going through :IpynbPeekClose, so if that
+--- happens this correctly-but-unhelpfully still thinks a preview is open -
+--- :IpynbPeekClose then :IpynbPeekOpen is the documented way out of that.
+--- Deliberately does NOT guard opening a *different* buffer/notebook while
+--- one is active - that's the larger, separate multi-notebook limitation
+--- (the server/kernel are both global singletons), not what this prevents.
+local active_bufnr = nil
+
 function M.open()
+  local bufnr = vim.api.nvim_get_current_buf()
+  if active_bufnr == bufnr then
+    vim.notify(
+      "[ipynb-peek] preview already open for this notebook - "
+        .. ":IpynbPeekClose first if you need to reopen it",
+      vim.log.levels.WARN
+    )
+    return
+  end
+  active_bufnr = bufnr
+
   server.start({ server_dir = M.config.server_dir })
 
-  local bufnr = vim.api.nvim_get_current_buf()
+  --- Without this, calling M.open() again on a buffer that's already had it
+  --- called before (close then reopen, or opening twice by accident) piles
+  --- up a duplicate set of these four buffer-local autocmds every time -
+  --- they're never cleared anywhere else, so each stacks on top of the last
+  --- and re-does its work (re-parsing cells, re-encoding, etc.) on every
+  --- keystroke/save/cursor move, growing with each reopen. Only clears
+  --- autocmds registered with `buffer = bufnr` in this group - VimLeavePre
+  --- above has no buffer filter, so it's untouched.
+  vim.api.nvim_clear_autocmds({ group = aug, buffer = bufnr })
+
   local last_cursor_index = nil
 
   local function send_cursor_update()
@@ -511,12 +665,20 @@ function M.close()
   end
   stop_event_listener()
   server.stop()
+  active_bufnr = nil
 end
 
 vim.api.nvim_create_user_command("IpynbPeekOpen", M.open, {})
 vim.api.nvim_create_user_command("IpynbPeekClose", M.close, {})
-vim.api.nvim_create_user_command("IpynbPeekRunCell", M.run_cell, {})
+--- Wrapped rather than passed directly: nvim_create_user_command always
+--- calls its callback with an opts table argument, which run_cell would
+--- otherwise see as a truthy `advance` on every invocation via this command.
+vim.api.nvim_create_user_command("IpynbPeekRunCell", function()
+  M.run_cell()
+end, {})
+vim.api.nvim_create_user_command("IpynbPeekRunCellAndAdvance", M.run_cell_and_advance, {})
 vim.api.nvim_create_user_command("IpynbPeekRunAll", M.run_all, {})
 vim.api.nvim_create_user_command("IpynbPeekRestartKernel", M.restart_kernel, {})
+vim.api.nvim_create_user_command("IpynbPeekInterruptKernel", M.interrupt_kernel, {})
 
 return M

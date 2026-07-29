@@ -237,3 +237,31 @@ export function patchNotebookOutputs(notebookJson: any, currentCells: RenderedCe
 
   return notebookJson
 }
+
+export type CellStatusInfo = {
+  index: number
+  status: "idle" | "busy"
+  execution_count?: number | null
+  duration_ms?: number
+  has_error: boolean
+}
+
+/**
+ * Shapes the subset of a cell's state that's relevant to the in-buffer
+ * status sign/virtual text pushed to Neovim over /events. `index` is a
+ * required parameter rather than reading `cell.index` - that field is only
+ * ever set once in renderNotebook and isn't kept in sync by syncCells' merge
+ * branch, so it can go stale the moment an insert/delete shifts array
+ * positions. Every other consumer of cell position (handleIopub,
+ * broadcastCell) already treats the array index as the only source of
+ * truth for this reason.
+ */
+export function cellStatusInfo(cell: RenderedCell, index: number): CellStatusInfo {
+  return {
+    index,
+    status: cell.status ?? "idle",
+    execution_count: cell.execution_count,
+    duration_ms: cell.duration_ms,
+    has_error: cell.outputs.some((output) => output.kind === "error"),
+  }
+}

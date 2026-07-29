@@ -3,6 +3,7 @@ import {
   mergeCells,
   syncCells,
   patchNotebookOutputs,
+  cellStatusInfo,
   type RenderedCell,
 } from "./notebook"
 import { handleIopub, reconcileBusyStatus, type PendingExec } from "./iopub"
@@ -20,15 +21,30 @@ function renderPayload(): string {
   return JSON.stringify({ type: "render", cells: currentCells })
 }
 
+/**
+ * Also pushes a bulk in-buffer status snapshot to Neovim over /events, so
+ * the sign-column icon/virtual-text on each cell's marker line stays
+ * correct after a full re-render/sync/restart, not just after individual
+ * cell updates (see broadcastCell) - covers a shrunk/reordered cell list,
+ * which a single-cell event can't safely reconcile on its own.
+ */
 function broadcastFull() {
   wsServer.publish("notebook", renderPayload())
+  emitEvent({ type: "cells_status", cells: currentCells.map(cellStatusInfo) })
 }
 
+/**
+ * Also pushes a single-cell status update to Neovim over /events (see
+ * broadcastFull for the bulk counterpart) - this is what lands the
+ * sign-column icon/virtual-text change onto the right buffer line the
+ * moment a cell goes busy, streams output, errors, or finishes.
+ */
 function broadcastCell(index: number) {
   wsServer.publish(
     "notebook",
     JSON.stringify({ type: "cell_update", index, cell: currentCells[index] }),
   )
+  emitEvent({ type: "cell_status", ...cellStatusInfo(currentCells[index], index) })
 }
 
 /**
@@ -288,6 +304,12 @@ export function createServer(port: number = Number(process.env.IPYNB_PEEK_PORT ?
 
         broadcastFull()
         return Response.json({ ok: true })
+      }
+
+      if (url.pathname === "/interrupt" && req.method === "POST") {
+        return handleJsonRoute(async () => {
+          writeToBridge({ cmd: "interrupt" })
+        })
       }
 
       if (url.pathname === "/events") {
