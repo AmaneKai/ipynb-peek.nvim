@@ -34,6 +34,8 @@ M.config = {
     run_all = "<leader>jR",
     restart_kernel = "<leader>jK",
     interrupt_kernel = "<leader>ji",
+    next_cell = "<leader>jj",
+    prev_cell = "<leader>jk",
   },
 }
 
@@ -157,22 +159,21 @@ local function require_server_ready()
   return false
 end
 
---- Moves the cursor to the first body line of the cell right after `index`
---- (0-based) in `parsed`, if one exists - clamped to the buffer's actual
---- line count in case that cell is just a bare marker line with no body yet.
---- Used by run_cell(true) to advance immediately after firing /execute,
---- rather than waiting on the async HTTP response - matching VS Code's
---- Shift+Enter, which moves on before the cell has finished running.
-local function advance_to_next_cell(bufnr, parsed, index)
-  local next_cell = cells.cell_after(parsed, index)
-  if not next_cell then
+--- Moves the cursor to the first body line of `cell`, if one is given -
+--- clamped to the buffer's actual line count in case that cell is just a
+--- bare marker line with no body yet. No-ops if `cell` is nil (used
+--- throughout as "no such cell exists, stay put" rather than an error).
+--- Shared by run_cell(true)'s advance-after-executing and the jump_to_*
+--- cell motions below.
+local function move_cursor_to_cell(bufnr, cell)
+  if not cell then
     return
   end
   local win = vim.fn.bufwinid(bufnr)
   if win == -1 then
     return
   end
-  local target_line = math.min(next_cell.start_line + 1, vim.api.nvim_buf_line_count(bufnr))
+  local target_line = math.min(cell.start_line + 1, vim.api.nvim_buf_line_count(bufnr))
   vim.api.nvim_win_set_cursor(win, { target_line, 0 })
 end
 
@@ -214,7 +215,7 @@ function M.run_cell(advance)
     end
   )
   if advance then
-    advance_to_next_cell(bufnr, parsed, index)
+    move_cursor_to_cell(bufnr, cells.cell_after(parsed, index))
   end
 end
 
@@ -223,6 +224,81 @@ end
 --- behavior for anyone already relying on it.
 function M.run_cell_and_advance()
   M.run_cell(true)
+end
+
+--- Moves the cursor `vim.v.count1` *code* cells in `direction` ("next" or
+--- "previous") - markdown cells are skipped over without consuming the
+--- count, since what you actually want when jumping around a notebook is
+--- almost always the next runnable cell, not the next section heading.
+--- Stops early (rather than erroring) if it runs out of code cells before
+--- the count is exhausted, matching how Vim's own `}`/`{` paragraph
+--- motions behave at the start/end of a buffer. Works with no
+--- server/preview running at all - this is pure buffer navigation, unlike
+--- every other command in this file.
+local function jump_cell(direction)
+  local bufnr = vim.api.nvim_get_current_buf()
+  local line = vim.api.nvim_win_get_cursor(0)[1]
+  local parsed = cells.parse(bufnr)
+  if warn_if_unparseable(parsed) then
+    return
+  end
+  local index = cells.cell_index_at(parsed, line)
+
+  if index == nil then
+    -- Cursor sits above the first marker - "next" jumps into the first
+    -- code cell; "previous" has nowhere to go.
+    local target
+    if direction == "next" then
+      for _, cell in ipairs(parsed) do
+        if cell.cell_type == "code" then
+          target = cell
+          break
+        end
+      end
+    end
+    move_cursor_to_cell(bufnr, target)
+    return
+  end
+
+  local target = parsed[index + 1]
+  local remaining = vim.v.count1
+  while remaining > 0 do
+    -- Deliberately not `direction == "next" and cells.cell_after(...) or
+    -- cells.cell_before(...)` - that `and/or` ternary silently breaks the
+    -- moment the "true" branch itself returns nil (exactly what cell_after
+    -- returns at the last cell), falling through to the `or` side and
+    -- stepping backward instead of stopping. Confirmed by hitting this
+    -- directly: jumping "next" from the last cell moved backward one cell
+    -- instead of staying put.
+    local stepped
+    if direction == "next" then
+      stepped = cells.cell_after(parsed, index)
+    else
+      stepped = cells.cell_before(parsed, index)
+    end
+    if not stepped then
+      break
+    end
+    index = index + (direction == "next" and 1 or -1)
+    if stepped.cell_type == "code" then
+      target = stepped
+      remaining = remaining - 1
+    end
+  end
+
+  move_cursor_to_cell(bufnr, target)
+end
+
+--- Jumps to the next code cell (or `vim.v.count1`-many code cells forward),
+--- skipping over markdown cells along the way.
+function M.jump_to_next_cell()
+  jump_cell("next")
+end
+
+--- Jumps to the previous code cell (or `vim.v.count1`-many code cells back),
+--- skipping over markdown cells along the way.
+function M.jump_to_previous_cell()
+  jump_cell("previous")
 end
 
 --- Runs every code cell in the buffer, top to bottom. Requests are chained
@@ -522,6 +598,8 @@ local KEYMAP_ACTIONS = {
   run_all = { fn = M.run_all, desc = "ipynb-peek: run all cells" },
   restart_kernel = { fn = M.restart_kernel, desc = "ipynb-peek: restart kernel" },
   interrupt_kernel = { fn = M.interrupt_kernel, desc = "ipynb-peek: interrupt kernel" },
+  next_cell = { fn = M.jump_to_next_cell, desc = "ipynb-peek: jump to next code cell" },
+  prev_cell = { fn = M.jump_to_previous_cell, desc = "ipynb-peek: jump to previous code cell" },
 }
 
 --- Sets each default (or user-overridden) keymap from M.config.keymaps,
@@ -681,5 +759,7 @@ vim.api.nvim_create_user_command("IpynbPeekRunCellAndAdvance", M.run_cell_and_ad
 vim.api.nvim_create_user_command("IpynbPeekRunAll", M.run_all, {})
 vim.api.nvim_create_user_command("IpynbPeekRestartKernel", M.restart_kernel, {})
 vim.api.nvim_create_user_command("IpynbPeekInterruptKernel", M.interrupt_kernel, {})
+vim.api.nvim_create_user_command("IpynbPeekNextCodeCell", M.jump_to_next_cell, {})
+vim.api.nvim_create_user_command("IpynbPeekPreviousCodeCell", M.jump_to_previous_cell, {})
 
 return M

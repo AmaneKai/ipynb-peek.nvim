@@ -10,6 +10,7 @@ Neovim isn't a great place to *look at* a notebook - cell outputs, images, rende
 - **Cursor-following scroll-sync.** Move around your buffer in normal mode and the preview scrolls to keep the matching cell in view.
 - **Real code execution.** `:IpynbPeekRunCell` / `:IpynbPeekRunAll` run against an actual `ipykernel` process - the notebook's own kernel, in its own venv, with its own working directory (relative paths like `../data/foo.csv` resolve exactly like they would in Jupyter or VS Code). Output streams in live, cell by cell, with a running execution timer while it's working and a final "ran in 1.2s" once it's done.
 - **Run cell and advance.** `:IpynbPeekRunCellAndAdvance` (VS Code's Shift+Enter) runs the current cell and moves your cursor straight to the next one.
+- **Jump between code cells.** `<leader>jj`/`<leader>jk` move the cursor to the next/previous *code* cell, skipping over markdown cells along the way - accepts numeric counts too (`3<leader>jj` jumps 3 code cells forward). No preview or kernel needed, just buffer navigation.
 - **In-buffer status, not just in the popup.** Every cell's `# %%` marker line gets a sign-column icon (● busy, ✓ success, ✗ error) plus `[n] 1.2s` virtual text - so you know a cell finished or errored without ever looking away from the buffer you're typing in. Toggle with `inline_status`.
 - **Interrupt, not just restart.** `:IpynbPeekInterruptKernel` stops whatever's currently running (`SIGINT`, same as Jupyter's own interrupt) without killing the kernel - your variables and imports survive, unlike a full restart.
 - **Cell insert/delete from the preview.** Hover between cells for "+ Code" / "+ Markdown" buttons, or hover a cell for a delete button - both land as real edits in your Neovim buffer (a genuine `# %%` block gets inserted or removed), not something trapped in the browser.
@@ -246,6 +247,8 @@ require("ipynb-peek").setup({
     run_all = "<leader>jR",
     restart_kernel = "<leader>jK",
     interrupt_kernel = "<leader>ji",
+    next_cell = "<leader>jj",
+    prev_cell = "<leader>jk",
   },
 })
 ```
@@ -261,6 +264,8 @@ require("ipynb-peek").setup({
 | `:IpynbPeekRunAll` | Run every code cell, top to bottom, in order |
 | `:IpynbPeekRestartKernel` | Kill and restart the kernel (loses all variables/state) |
 | `:IpynbPeekInterruptKernel` | Stop whatever's currently running, keeping the kernel's state intact - POSIX only, see [Troubleshooting](#troubleshooting) |
+| `:IpynbPeekNextCodeCell` | Jump to the next code cell, skipping markdown cells |
+| `:IpynbPeekPreviousCodeCell` | Jump to the previous code cell, skipping markdown cells |
 
 ## Default keymaps
 
@@ -275,6 +280,8 @@ Buffer-local, set as soon as you open a `.ipynb` file:
 | `<leader>jR` | Run all cells |
 | `<leader>jK` | Restart kernel |
 | `<leader>ji` | Interrupt kernel |
+| `<leader>jj` | Jump to next code cell, skipping markdown cells (accepts a count, e.g. `3<leader>jj`) |
+| `<leader>jk` | Jump to previous code cell, skipping markdown cells (accepts a count, e.g. `3<leader>jk`) |
 
 Override or disable any of these via `setup({ keymaps = { ... } })` - see [Configuration](#configuration).
 
@@ -314,7 +321,7 @@ make testserver   # server/ - vitest
 
 `make testlua` vendors a throwaway `plenary.nvim` clone into `.tests/` (gitignored) if one isn't already on your machine, so it works the same locally and in CI. Both suites run on every push/PR via GitHub Actions (`.github/workflows/ci.yml`).
 
-The Lua tests cover `cells.lua`'s buffer parsing directly against real scratch buffers, plus `status.lua`'s pure icon/virtual-text formatting for the in-buffer status signs. The server tests cover the pure notebook-rendering/merge/sync logic (`notebook.ts`), the Jupyter iopub message handling (`iopub.ts`), the wire-protocol framing (`wire-protocol.mjs`), and the HTTP/WebSocket routing layer (including a real `/ws` connection) against a real server instance on a random port. Deliberately not covered by CI: anything that needs a live Jupyter kernel or a real browser popup - those are exercised by hand against a real kernel before a release, not automated.
+The Lua tests cover `cells.lua`'s buffer parsing directly against real scratch buffers, `status.lua`'s pure icon/virtual-text formatting for the in-buffer status signs, and the cell-jump motions in `init.lua` against real scratch buffers/windows (with `server.lua`/`browser.lua`/`client.lua` stubbed out, since those commands are pure buffer navigation with no server involved). The server tests cover the pure notebook-rendering/merge/sync logic (`notebook.ts`), the Jupyter iopub message handling (`iopub.ts`), the wire-protocol framing (`wire-protocol.mjs`), and the HTTP/WebSocket routing layer (including a real `/ws` connection) against a real server instance on a random port. Deliberately not covered by CI: anything that needs a live Jupyter kernel or a real browser popup - those are exercised by hand against a real kernel before a release, not automated.
 
 `server/dist/` is committed to the repo, not generated at install time - after changing anything in `server/src`, run `make build` and commit the result. `make checkbuild` (also run in CI) fails if a rebuild was needed but forgotten.
 

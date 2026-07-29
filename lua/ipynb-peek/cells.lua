@@ -48,6 +48,12 @@ function M.cell_after(parsed, index)
   return parsed[index + 2]
 end
 
+--- Symmetric counterpart to cell_after - the cell right before the 0-based
+--- `index`, or nil if `index` refers to the first cell.
+function M.cell_before(parsed, index)
+  return parsed[index]
+end
+
 --- Extracts a cell's body source, excluding the `# %%` marker line itself.
 function M.source(bufnr, cell)
   local lines = vim.api.nvim_buf_get_lines(bufnr, cell.start_line, cell.end_line, false)
