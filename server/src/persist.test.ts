@@ -48,4 +48,25 @@ describe("writeNotebookFile", () => {
 
     expect(readdirSync(dir)).toEqual(["test.ipynb"])
   })
+
+  test("serializes concurrent writes to the same path instead of racing on the shared tmp file", async () => {
+    // Regression test: two concurrent calls used to both target the same
+    // `${path}.ipynb-peek.tmp` file. Whichever renamed it away first left
+    // the other's rename failing with ENOENT. Firing many concurrent pairs
+    // makes the race observable if serialization ever regresses.
+    for (let i = 0; i < 50; i++) {
+      const dir = makeTmpDir()
+      const path = join(dir, "test.ipynb")
+
+      const results = await Promise.allSettled([
+        writeNotebookFile(path, { a: 1 }),
+        writeNotebookFile(path, { a: 2 }),
+      ])
+
+      expect(results.every((r) => r.status === "fulfilled")).toBe(true)
+      // Calls are serialized in call order, so the second call's write wins.
+      expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ a: 2 })
+      expect(readdirSync(dir)).toEqual(["test.ipynb"])
+    }
+  })
 })
