@@ -261,7 +261,7 @@ require("ipynb-peek").setup({
 | `:IpynbPeekClose` | Stop the server (and best-effort close the popup) |
 | `:IpynbPeekRunCell` | Run the code cell under the cursor |
 | `:IpynbPeekRunCellAndAdvance` | Run the current cell and move the cursor to the next one |
-| `:IpynbPeekRunAll` | Run every code cell, top to bottom, in order |
+| `:IpynbPeekRunAll` | Run every code cell, top to bottom, one at a time - stops at the first cell that errors, like Jupyter/VS Code's own "Run All" |
 | `:IpynbPeekRestartKernel` | Kill and restart the kernel (loses all variables/state) |
 | `:IpynbPeekInterruptKernel` | Stop whatever's currently running, keeping the kernel's state intact - POSIX only, see [Troubleshooting](#troubleshooting) |
 | `:IpynbPeekNextCodeCell` | Jump to the next code cell, skipping markdown cells |

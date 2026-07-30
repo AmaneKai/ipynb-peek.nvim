@@ -301,13 +301,28 @@ function M.jump_to_previous_cell()
   jump_cell("previous")
 end
 
---- Runs every code cell in the buffer, top to bottom. Requests are chained
---- (each fires only after the previous one's HTTP response comes back), not
---- fired all at once: the kernel processes execute_requests strictly in the
---- order it receives them, but firing all N requests concurrently via
---- separate curl subprocesses gives no guarantee they *arrive* in that
---- order. Chaining on the response - not full cell completion - is enough,
---- since the kernel already serializes actual execution once requests land.
+--- Keyed by 0-based cell index; fulfilled from handle_event_line's
+--- "cell_status" branch below once that cell's execution actually finishes
+--- (status == "idle"), not just when /execute's HTTP response comes back.
+--- Used by run_all to serialize on real completion - see its own comment
+--- for why that distinction matters.
+local run_all_waiters = {}
+
+--- Runs every code cell in the buffer, top to bottom, stopping at the first
+--- one that errors (matching real Jupyter/VS Code's default "Run All").
+---
+--- Each cell's /execute is only fired once the previous cell has actually
+--- finished - not just once its HTTP response came back. /execute's
+--- response returns the instant the request is handed to the kernel
+--- bridge (writeToBridge is fire-and-forget, never awaited on the cell
+--- actually completing), so chaining on that alone - as this used to -
+--- fires every cell's request within milliseconds of each other: the
+--- kernel still executes them in order internally, but every cell's
+--- "busy" status broadcasts to the popup almost simultaneously, which
+--- looks (and effectively is, from a "can I trust what I'm seeing right
+--- now" standpoint) like everything running at once. Waiting for the
+--- run_all_waiters entry above - fulfilled by a real "idle" cell_status
+--- event over /events - fixes that.
 function M.run_all()
   if not require_server_ready() then
     return
@@ -330,6 +345,24 @@ function M.run_all()
     if not entry then
       return
     end
+
+    -- Registered *before* firing the request, not inside its response
+    -- callback: /execute (a one-shot POST) and /events (a separate,
+    -- long-lived curl process) are independent HTTP flows with no
+    -- ordering guarantee between them - a fast enough cell could have its
+    -- "idle" event delivered before /execute's own response arrives.
+    -- Registering first closes that race regardless of which flow wins.
+    run_all_waiters[entry.index] = function(status_info)
+      if status_info.has_error then
+        vim.notify(
+          "[ipynb-peek] run all stopped: cell " .. (entry.index + 1) .. " errored",
+          vim.log.levels.WARN
+        )
+        return
+      end
+      run_next(position + 1)
+    end
+
     client.request(
       server.port,
       "/execute",
@@ -337,12 +370,14 @@ function M.run_all()
       nil,
       function(decoded)
         if not decoded.ok then
+          run_all_waiters[entry.index] = nil -- request never landed, nothing to wait for
           vim.notify(
             "[ipynb-peek] execute error: " .. tostring(decoded.error),
             vim.log.levels.ERROR
           )
         end
-        run_next(position + 1)
+        -- success: don't advance here - the waiter above does that once
+        -- the cell actually finishes.
       end
     )
   end
@@ -534,6 +569,11 @@ local function handle_event_line(bufnr, line)
   elseif decoded.type == "cell_status" then
     vim.schedule(function()
       apply_cell_status(bufnr, decoded)
+      local waiter = run_all_waiters[decoded.index]
+      if waiter and decoded.status == "idle" then
+        run_all_waiters[decoded.index] = nil
+        waiter(decoded)
+      end
     end)
   elseif decoded.type == "cells_status" then
     vim.schedule(function()
