@@ -26,9 +26,14 @@ function M.start(opts)
   M.url = nil
   M.ready = false
 
+  local env = { IPYNB_PEEK_PORT = tostring(M.port) }
+  if opts.theme ~= nil then
+    env.IPYNB_PEEK_THEME = vim.json.encode(opts.theme)
+  end
+
   job_id = vim.fn.jobstart({ "node", "dist/index.js" }, {
     cwd = opts.server_dir,
-    env = { IPYNB_PEEK_PORT = tostring(M.port) },
+    env = env,
     stdout_buffered = false,
     on_stdout = function(_, data)
       for _, line in ipairs(data) do

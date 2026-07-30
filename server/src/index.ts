@@ -14,6 +14,7 @@ import {
 } from "./notebook"
 import { handleIopub, reconcileBusyStatus, type PendingExec } from "./iopub"
 import { writeNotebookFile } from "./persist"
+import { buildThemeCss } from "./themes"
 
 let currentCells: RenderedCell[] = []
 let currentNotebookJson: any = null
@@ -234,10 +235,30 @@ function serveAsset(res: http.ServerResponse, filename: string, contentType: str
   res.end(readFileSync(new URL(`./${filename}`, import.meta.url)))
 }
 
+/**
+ * IPYNB_PEEK_THEME is fixed for the lifetime of this process (set once by
+ * lua/ipynb-peek/server.lua when it spawns this server, from M.config.theme)
+ * - computed once here rather than per-request.
+ */
+const themeCss = buildThemeCss(process.env.IPYNB_PEEK_THEME)
+
+/**
+ * Injects the theme's `:root { --ipynb-x: ... }` block into index.html
+ * before serving it, so the popup never renders with un-themed colors and
+ * then flashes to the real ones - style.css's own var() fallbacks only
+ * cover the "no theme configured at all" case.
+ */
+function serveIndexHtml(res: http.ServerResponse) {
+  const html = readFileSync(new URL("./index.html", import.meta.url), "utf8")
+  const themed = html.replace("</head>", `<style>${themeCss}</style>\n</head>`)
+  res.writeHead(200, { "content-type": "text/html; charset=utf-8" })
+  res.end(themed)
+}
+
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse) {
   const url = new URL(req.url ?? "/", "http://localhost")
 
-  if (url.pathname === "/") return serveAsset(res, "index.html", "text/html; charset=utf-8")
+  if (url.pathname === "/") return serveIndexHtml(res)
 
   if (url.pathname === "/style.css") return serveAsset(res, "style.css", "text/css; charset=utf-8")
 

@@ -3,9 +3,9 @@
 html, body {
   margin: 0;
   padding: 0;
-  background: #1e1e1e;
-  color: #d4d4d4;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: var(--ipynb-bg, #1e1e1e);
+  color: var(--ipynb-fg, #d4d4d4);
+  font-family: var(--ipynb-font-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
 }
 #notebook {
   max-width: 860px;
@@ -21,7 +21,7 @@ html, body {
   transition: border-color 0.15s ease;
 }
 .cell.active-cell {
-  border-left-color: #007acc;
+  border-left-color: var(--ipynb-accent, #007acc);
 }
 .delete-cell-btn {
   position: absolute;
@@ -33,9 +33,9 @@ html, body {
   text-align: center;
   padding: 0;
   font-size: 12px;
-  color: #cccccc;
-  background: #2d2d2d;
-  border: 1px solid #3c3c3c;
+  color: var(--ipynb-fg, #cccccc);
+  background: var(--ipynb-surface, #2d2d2d);
+  border: 1px solid var(--ipynb-border, #3c3c3c);
   border-radius: 4px;
   cursor: pointer;
   opacity: 0;
@@ -45,15 +45,15 @@ html, body {
   opacity: 1;
 }
 .delete-cell-btn:hover {
-  background: #c74e39;
-  border-color: #c74e39;
+  background: var(--ipynb-danger, #c74e39);
+  border-color: var(--ipynb-danger, #c74e39);
   color: #fff;
 }
 .cell-number {
   font-size: 10px;
-  color: #5a5a5a;
+  color: var(--ipynb-dim, #5a5a5a);
   margin-bottom: 6px;
-  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--ipynb-font-mono, "SF Mono", Menlo, Consolas, monospace);
   user-select: none;
 }
 .add-cell-bar {
@@ -71,21 +71,21 @@ html, body {
 }
 .add-cell-btn {
   font-size: 11px;
-  color: #cccccc;
-  background: #2d2d2d;
-  border: 1px solid #3c3c3c;
+  color: var(--ipynb-fg, #cccccc);
+  background: var(--ipynb-surface, #2d2d2d);
+  border: 1px solid var(--ipynb-border, #3c3c3c);
   border-radius: 4px;
   padding: 3px 10px;
   cursor: pointer;
   font-family: inherit;
 }
 .add-cell-btn:hover {
-  background: #3c3c3c;
+  background: var(--ipynb-border, #3c3c3c);
 }
 .code-cell .code-box {
   position: relative;
-  background: #252526;
-  border: 1px solid #3c3c3c;
+  background: var(--ipynb-surface, #252526);
+  border: 1px solid var(--ipynb-border, #3c3c3c);
   border-radius: 6px;
   padding: 12px 14px 22px;
   overflow-x: auto;
@@ -94,8 +94,8 @@ html, body {
   margin: 0;
 }
 .code-cell .code-box code {
-  font-family: "SF Mono", Menlo, Consolas, monospace;
-  font-size: 13px;
+  font-family: var(--ipynb-font-mono, "SF Mono", Menlo, Consolas, monospace);
+  font-size: var(--ipynb-font-size-code, 13px);
   line-height: 1.5;
   background: transparent !important;
 }
@@ -107,22 +107,22 @@ html, body {
   align-items: center;
   gap: 7px;
   font-size: 11px;
-  color: #6a6a6a;
-  font-family: "SF Mono", Menlo, Consolas, monospace;
+  color: var(--ipynb-muted, #6a6a6a);
+  font-family: var(--ipynb-font-mono, "SF Mono", Menlo, Consolas, monospace);
   user-select: none;
 }
 .exec-count.busy {
-  color: #4fc1ff;
+  color: var(--ipynb-accent, #4fc1ff);
 }
 .timing {
-  color: #6a6a6a;
+  color: var(--ipynb-muted, #6a6a6a);
 }
 .lang-label {
   position: absolute;
   right: 12px;
   bottom: 4px;
   font-size: 11px;
-  color: #6a6a6a;
+  color: var(--ipynb-muted, #6a6a6a);
   user-select: none;
 }
 .outputs {
@@ -162,15 +162,15 @@ html, body {
   margin: 4px 0;
   white-space: pre-wrap;
   word-break: break-word;
-  font-family: "SF Mono", Menlo, Consolas, monospace;
-  font-size: 13px;
-  color: #cccccc;
+  font-family: var(--ipynb-font-mono, "SF Mono", Menlo, Consolas, monospace);
+  font-size: var(--ipynb-font-size-code, 13px);
+  color: var(--ipynb-fg, #cccccc);
 }
 .outputs .error-output {
-  color: #f48771;
+  color: var(--ipynb-error, #f48771);
 }
 .outputs .stderr-output {
-  background: rgba(244, 135, 113, 0.12);
+  background: color-mix(in srgb, var(--ipynb-error, #f48771) 12%, transparent);
   border-radius: 3px;
   padding: 2px 6px;
   margin: 4px -6px;
@@ -182,23 +182,23 @@ html, body {
   overflow-x: auto;
 }
 .outputs td, .outputs th {
-  border: 1px solid #3c3c3c;
+  border: 1px solid var(--ipynb-border, #3c3c3c);
   padding: 4px 10px;
 }
 .md-cell {
-  font-size: 15px;
+  font-size: var(--ipynb-font-size-md, 15px);
   line-height: 1.7;
 }
-.md-cell h1, .md-cell h2, .md-cell h3, .md-cell h4 { color: #e8e8e8; margin: 1.4em 0 0.5em; }
+.md-cell h1, .md-cell h2, .md-cell h3, .md-cell h4 { color: var(--ipynb-heading, #e8e8e8); margin: 1.4em 0 0.5em; }
 .md-cell h1 { font-size: 1.8em; }
 .md-cell h2 { font-size: 1.5em; }
 .md-cell h3 { font-size: 1.25em; }
 .md-cell p { margin: 0.9em 0; }
 .md-cell code {
-  background: #2d2d2d;
+  background: var(--ipynb-surface, #2d2d2d);
   padding: 1px 5px;
   border-radius: 3px;
-  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--ipynb-font-mono, "SF Mono", Menlo, Consolas, monospace);
   font-size: 0.9em;
 }
 .md-cell pre code {
@@ -206,8 +206,67 @@ html, body {
   padding: 10px;
 }
 .raw-cell pre {
-  font-family: "SF Mono", Menlo, Consolas, monospace;
-  font-size: 13px;
-  color: #a0a0a0;
+  font-family: var(--ipynb-font-mono, "SF Mono", Menlo, Consolas, monospace);
+  font-size: var(--ipynb-font-size-code, 13px);
+  color: var(--ipynb-muted, #a0a0a0);
   white-space: pre-wrap;
+}
+
+/* Syntax highlighting (highlight.js token classes) - colored via theme
+   tokens directly instead of loading one of highlight.js's own prebuilt
+   stylesheets, so custom/preset themes apply to code coloring too. */
+.hljs {
+  color: var(--ipynb-fg, #d4d4d4);
+  background: transparent;
+}
+.hljs-comment,
+.hljs-quote {
+  color: var(--ipynb-syn-comment, #6a9955);
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-subst,
+.hljs-meta,
+.hljs-meta .hljs-keyword {
+  color: var(--ipynb-syn-keyword, #569cd6);
+}
+.hljs-string,
+.hljs-doctag,
+.hljs-regexp,
+.hljs-addition {
+  color: var(--ipynb-syn-string, #ce9178);
+}
+.hljs-number {
+  color: var(--ipynb-syn-number, #b5cea8);
+}
+.hljs-title,
+.hljs-title.function_,
+.hljs-section,
+.hljs-selector-id {
+  color: var(--ipynb-syn-function, #dcdcaa);
+}
+.hljs-type,
+.hljs-class .hljs-title,
+.hljs-title.class_,
+.hljs-built_in,
+.hljs-symbol {
+  color: var(--ipynb-syn-type, #4ec9b0);
+}
+.hljs-variable,
+.hljs-template-variable,
+.hljs-attr,
+.hljs-attribute,
+.hljs-params {
+  color: var(--ipynb-syn-variable, #9cdcfe);
+}
+.hljs-deletion {
+  color: var(--ipynb-error, #f48771);
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: bold;
 }

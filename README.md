@@ -17,6 +17,7 @@ Neovim isn't a great place to *look at* a notebook - cell outputs, images, rende
 - **Click-to-zoom images.** Plot output too small to read? Click it for a full-size overlay.
 - **Kernel restart on demand**, for the moment you `pip install`/`uv pip install` something new and the running kernel hasn't picked it up yet.
 - **Chromeless popup**, not a browser tab cluttering your normal browsing - a dedicated app-mode window, sized and positioned however you like.
+- **Themeable preview.** Built-in `dark`, `tokyonight`, `gruvbox`, and `rose-pine` presets, plus per-token color overrides and custom UI/monospace fonts and sizes - see `theme` in [Configuration](#configuration).
 
 ## Prerequisites
 
@@ -235,6 +236,28 @@ require("ipynb-peek").setup({
   -- Sign-column icon + "[n] 1.2s" virtual text on each cell's marker line
   -- showing its execution status. Set to false if you find it noisy.
   inline_status = true,
+
+  -- Preview colors and fonts. `preset` is one of "dark" (default),
+  -- "tokyonight", "gruvbox", "rose-pine". `colors` overrides individual
+  -- tokens from that preset; `font` overrides font stacks/sizes. Everything
+  -- here is optional - omit `colors`/`font` entirely to just use the preset
+  -- as-is. Takes effect on the next `:IpynbPeekOpen` after `:IpynbPeekClose`
+  -- (the server process picks it up once, at spawn).
+  theme = {
+    preset = "dark",
+    colors = {
+      -- bg, fg, surface, border, muted, dim, accent, heading, danger, error,
+      -- syn_keyword, syn_string, syn_comment, syn_number, syn_function,
+      -- syn_variable, syn_type
+      -- accent = "#7aa2f7",
+    },
+    font = {
+      -- ui = "Inter, sans-serif",       -- markdown/UI text
+      -- mono = "JetBrains Mono, monospace", -- code, exec counts, timings
+      -- size_code = 13,                 -- px
+      -- size_md = 15,                   -- px
+    },
+  },
 
   -- Keymaps, buffer-local, set as soon as you open a .ipynb file (not just
   -- after the preview is running). Set any entry to `false` to disable it -

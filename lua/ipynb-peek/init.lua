@@ -26,6 +26,17 @@ M.config = {
   window = { width = 900, height = 1000 },
   position = { x = 40, y = 40 },
   inline_status = true,
+  --- Preview color/font theme. `preset` picks a built-in palette ("dark"
+  --- (default), "tokyonight", "gruvbox", "rose-pine"); `colors` overrides
+  --- individual tokens from that preset (see README for the full token
+  --- list); `font` overrides UI/monospace font stacks and code/markdown
+  --- font sizes. Takes effect on the next `:IpynbPeekOpen` (server process
+  --- picks it up once at spawn) - see [[README]] Configuration section.
+  theme = {
+    preset = "dark",
+    colors = {},
+    font = {},
+  },
   keymaps = {
     open = "<leader>jo",
     close = "<leader>jc",
@@ -695,7 +706,7 @@ function M.open()
   end
   active_bufnr = bufnr
 
-  server.start({ server_dir = M.config.server_dir })
+  server.start({ server_dir = M.config.server_dir, theme = M.config.theme })
 
   --- Without this, calling M.open() again on a buffer that's already had it
   --- called before (close then reopen, or opening twice by accident) piles
