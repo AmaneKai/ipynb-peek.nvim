@@ -376,6 +376,13 @@ var notebookKernelName;
 var notebookDir;
 var notebookPath;
 var wsClients = /* @__PURE__ */ new Set();
+var authToken;
+function isAuthorized(req, url) {
+  if (!authToken) return true;
+  const header = req.headers["x-ipynb-peek-token"];
+  if (typeof header === "string" && header === authToken) return true;
+  return url.searchParams.get("token") === authToken;
+}
 function renderPayload() {
   return JSON.stringify({ type: "render", cells: currentCells });
 }
@@ -513,10 +520,14 @@ function serveAsset(res, filename, contentType) {
 var themeCss = buildThemeCss(process.env.IPYNB_PEEK_THEME);
 function serveIndexHtml(res) {
   const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
-  const themed = html.replace("</head>", `<style>${themeCss}</style>
-</head>`);
+  const injected = html.replace(
+    "</head>",
+    `<style>${themeCss}</style>
+<script>window.__IPYNB_PEEK_TOKEN__=${JSON.stringify(authToken ?? "")}</script>
+</head>`
+  );
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-  res.end(themed);
+  res.end(injected);
 }
 async function handleRequest(req, res) {
   const url = new URL(req.url ?? "/", "http://localhost");
@@ -528,6 +539,7 @@ async function handleRequest(req, res) {
     res.writeHead(200, { "content-type": "text/plain" });
     return res.end("ok");
   }
+  if (!isAuthorized(req, url)) return sendJson(res, 401, { ok: false, error: "unauthorized" });
   if (url.pathname === "/render" && req.method === "POST") {
     return handleJsonRoute(res, async () => {
       const dirHeader = req.headers["x-notebook-dir"];
@@ -603,8 +615,9 @@ async function handleRequest(req, res) {
   res.writeHead(404);
   res.end("not found");
 }
-function createServer(port = Number(process.env.IPYNB_PEEK_PORT ?? 0)) {
+function createServer(port = Number(process.env.IPYNB_PEEK_PORT ?? 0), token = process.env.IPYNB_PEEK_TOKEN) {
   wsClients = /* @__PURE__ */ new Set();
+  authToken = token;
   const httpServer = http.createServer((req, res) => {
     handleRequest(req, res).catch((error) => {
       console.error("[ipynb-peek] unhandled request error:", error);
@@ -641,7 +654,7 @@ function createServer(port = Number(process.env.IPYNB_PEEK_PORT ?? 0)) {
   });
   httpServer.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url ?? "/", "http://localhost");
-    if (url.pathname !== "/ws") {
+    if (url.pathname !== "/ws" || !isAuthorized(req, url)) {
       socket.destroy();
       return;
     }

@@ -247,7 +247,9 @@ const ansiUp = new AnsiUp()
   let currentWs = null
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws"
-    const ws = new WebSocket(proto + "://" + location.host + "/ws")
+    const token = window.__IPYNB_PEEK_TOKEN__
+    const query = token ? "?token=" + encodeURIComponent(token) : ""
+    const ws = new WebSocket(proto + "://" + location.host + "/ws" + query)
     currentWs = ws
     ws.onopen = () => {
       backoff = 300

@@ -98,6 +98,63 @@ describe("POST /execute", () => {
   })
 })
 
+describe("POST /restart", () => {
+  test("reports ok without a kernel ever having been started", async () => {
+    const response = await fetch(`${baseUrl}/restart`, { method: "POST" })
+    expect(await readOk(response)).toBe(true)
+  })
+
+  test("flips any busy cell back to idle", async () => {
+    const notebook = {
+      metadata: { kernelspec: { language: "python" } },
+      cells: [{ cell_type: "code", source: ["1 + 1"], outputs: [] }],
+    }
+    await fetch(`${baseUrl}/render`, {
+      method: "POST",
+      body: JSON.stringify(notebook),
+      headers: { "x-notebook-dir": "/tmp" },
+    })
+
+    const { ws, ready, nextMessage } = (function connect(url: string) {
+      const socket = new WebSocket(url)
+      const queue: any[] = []
+      const waiters: Array<(msg: any) => void> = []
+      socket.on("message", (data) => {
+        const parsed = JSON.parse(data.toString())
+        const waiter = waiters.shift()
+        if (waiter) waiter(parsed)
+        else queue.push(parsed)
+      })
+      return {
+        ws: socket,
+        ready: new Promise<void>((resolve) => socket.once("open", () => resolve())),
+        nextMessage(): Promise<any> {
+          const queued = queue.shift()
+          if (queued !== undefined) return Promise.resolve(queued)
+          return new Promise((resolve) => waiters.push(resolve))
+        },
+      }
+    })(wsUrl)
+    await ready
+    await nextMessage() // initial render payload
+
+    const restartBroadcast = nextMessage()
+    await fetch(`${baseUrl}/restart`, { method: "POST" })
+    const rendered = await restartBroadcast
+    expect(rendered.type).toBe("render")
+    expect(rendered.cells.every((cell: any) => cell.status !== "busy")).toBe(true)
+
+    ws.close()
+  })
+})
+
+describe("POST /interrupt", () => {
+  test("reports ok even with no kernel running (a no-op write)", async () => {
+    const response = await fetch(`${baseUrl}/interrupt`, { method: "POST" })
+    expect(await readOk(response)).toBe(true)
+  })
+})
+
 describe("POST /cursor", () => {
   test("accepts a cursor update and reports ok", async () => {
     const response = await fetch(`${baseUrl}/cursor`, {
@@ -164,5 +221,76 @@ describe("unknown routes", () => {
   test("returns 404", async () => {
     const response = await fetch(`${baseUrl}/does-not-exist`)
     expect(response.status).toBe(404)
+  })
+})
+
+describe("auth token", () => {
+  let tokenServer: Awaited<ReturnType<typeof createServer>>
+  let tokenBaseUrl: string
+  let tokenWsUrl: string
+  const token = "test-secret-token"
+
+  beforeAll(async () => {
+    tokenServer = await createServer(0, token)
+    tokenBaseUrl = `http://127.0.0.1:${tokenServer.port}`
+    tokenWsUrl = `ws://127.0.0.1:${tokenServer.port}/ws`
+  })
+
+  afterAll(() => {
+    tokenServer.stop(true)
+  })
+
+  test("GET / and /health need no token", async () => {
+    expect((await fetch(`${tokenBaseUrl}/`)).status).toBe(200)
+    expect((await fetch(`${tokenBaseUrl}/health`)).status).toBe(200)
+  })
+
+  test("GET / embeds the token for the page's own client.js to use", async () => {
+    const html = await (await fetch(`${tokenBaseUrl}/`)).text()
+    expect(html).toContain(`window.__IPYNB_PEEK_TOKEN__=${JSON.stringify(token)}`)
+  })
+
+  test("rejects /cursor with no token", async () => {
+    const response = await fetch(`${tokenBaseUrl}/cursor`, {
+      method: "POST",
+      body: JSON.stringify({ index: 0 }),
+    })
+    expect(response.status).toBe(401)
+  })
+
+  test("rejects /cursor with the wrong token", async () => {
+    const response = await fetch(`${tokenBaseUrl}/cursor`, {
+      method: "POST",
+      body: JSON.stringify({ index: 0 }),
+      headers: { "x-ipynb-peek-token": "wrong" },
+    })
+    expect(response.status).toBe(401)
+  })
+
+  test("accepts /cursor with the right token header", async () => {
+    const response = await fetch(`${tokenBaseUrl}/cursor`, {
+      method: "POST",
+      body: JSON.stringify({ index: 0 }),
+      headers: { "x-ipynb-peek-token": token },
+    })
+    expect(response.status).toBe(200)
+  })
+
+  test("rejects a /ws upgrade with no token", async () => {
+    const ws = new WebSocket(tokenWsUrl)
+    await new Promise<void>((resolve) => {
+      ws.once("error", () => resolve())
+      ws.once("close", () => resolve())
+    })
+    expect(ws.readyState).not.toBe(WebSocket.OPEN)
+  })
+
+  test("accepts a /ws upgrade with the token as a query param", async () => {
+    const ws = new WebSocket(`${tokenWsUrl}?token=${token}`)
+    await new Promise<void>((resolve, reject) => {
+      ws.once("open", () => resolve())
+      ws.once("error", reject)
+    })
+    ws.close()
   })
 })

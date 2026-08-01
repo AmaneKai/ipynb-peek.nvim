@@ -1,5 +1,6 @@
 local M = {}
 local uv = vim.loop
+local server = require("ipynb-peek.server")
 
 local timers = {}
 
@@ -7,9 +8,16 @@ local timers = {}
 --- of raw "Name: value" strings.
 --- The server pushes rendered/execution state to connected browser clients
 --- over its websocket; the HTTP response here only carries { ok, error }.
+--- Always authenticates with server.token (see server.lua) - every state-
+--- changing route requires it, so call sites here don't each need to
+--- remember to attach it themselves.
 function M.request(port, path, body, headers, on_result)
   local url = string.format("http://127.0.0.1:%d%s", port, path)
   local args = { "curl", "-s", "-X", "POST" }
+  if server.token then
+    table.insert(args, "-H")
+    table.insert(args, "X-Ipynb-Peek-Token: " .. server.token)
+  end
   for _, header in ipairs(headers or {}) do
     table.insert(args, "-H")
     table.insert(args, header)

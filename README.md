@@ -316,6 +316,8 @@ A Node server handles the HTTP/WebSocket connection to the preview page. Actuall
 
 `server/dist/` (what actually runs) is a prebuilt, committed-to-the-repo bundle - `npm install` only needs to fetch `zeromq`'s native binding and `ws`; there's no TypeScript build step on your end.
 
+**Security.** The server binds to `127.0.0.1` only, and every request that changes state (running/interrupting/restarting the kernel, editing cells) requires a random per-session token that Neovim generates and passes to both the server and the preview page - no other page open in your browser can drive it just by finding the port. Rendered notebook output (rich/HTML cell outputs, Markdown) is inserted into the preview page unsanitized, the same trust model as Jupyter's own browser UI: don't run untrusted notebooks.
+
 ## Troubleshooting
 
 **Nothing happens when I run a cell / open the preview / do anything at all, with no error.** Almost always `vim.g.jupytext_fmt` isn't set to a percent format - see the callout under [Prerequisites](#prerequisites). Run `:checkhealth ipynb-peek`, which checks this specifically.

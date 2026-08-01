@@ -319,6 +319,16 @@ end
 --- for why that distinction matters.
 local run_all_waiters = {}
 
+--- Bumped by every M.run_all() call; each waiter closure captures the
+--- generation it was created under and checks it's still current before
+--- acting. Without this, starting a new :IpynbPeekRunAll while a previous
+--- one is still in flight lets a stale waiter at the same cell index (left
+--- behind by the old run) fire against the new run's chain - or the new
+--- run's own waiter get invoked by a leftover "idle" event that actually
+--- belongs to the old run. A plain table keyed by index alone can't tell
+--- those apart; the generation can.
+local run_all_generation = 0
+
 --- Runs every code cell in the buffer, top to bottom, stopping at the first
 --- one that errors (matching real Jupyter/VS Code's default "Run All").
 ---
@@ -351,7 +361,14 @@ function M.run_all()
     end
   end
 
+  run_all_generation = run_all_generation + 1
+  local generation = run_all_generation
+  run_all_waiters = {} -- abandon any waiters a still-in-flight previous run left behind
+
   local function run_next(position)
+    if generation ~= run_all_generation then
+      return -- superseded by a newer run_all before this one finished
+    end
     local entry = code_cells[position]
     if not entry then
       return
@@ -364,6 +381,9 @@ function M.run_all()
     -- "idle" event delivered before /execute's own response arrives.
     -- Registering first closes that race regardless of which flow wins.
     run_all_waiters[entry.index] = function(status_info)
+      if generation ~= run_all_generation then
+        return
+      end
       if status_info.has_error then
         vim.notify(
           "[ipynb-peek] run all stopped: cell " .. (entry.index + 1) .. " errored",
@@ -381,7 +401,9 @@ function M.run_all()
       nil,
       function(decoded)
         if not decoded.ok then
-          run_all_waiters[entry.index] = nil -- request never landed, nothing to wait for
+          if generation == run_all_generation then
+            run_all_waiters[entry.index] = nil -- request never landed, nothing to wait for
+          end
           vim.notify(
             "[ipynb-peek] execute error: " .. tostring(decoded.error),
             vim.log.levels.ERROR
@@ -496,6 +518,18 @@ end
 
 local events_job = nil
 local events_should_run = false
+--- Reconnect backoff state for start_event_listener - doubles on each
+--- attempt that never received a single byte (server not up yet, or down),
+--- capped at EVENTS_BACKOFF_MAX_MS, and resets to the base delay the
+--- moment a connection actually receives data. Without a cap this retried
+--- every 500ms forever in a broken environment (node missing, server
+--- crash-looping); this bounds that noise while still recovering on its
+--- own once the server comes back.
+local EVENTS_BACKOFF_BASE_MS = 500
+local EVENTS_BACKOFF_MAX_MS = 10000
+local EVENTS_WARN_AFTER_FAILURES = 5
+local events_backoff_ms = EVENTS_BACKOFF_BASE_MS
+local events_consecutive_failures = 0
 
 local status_ns = vim.api.nvim_create_namespace("ipynb-peek-status")
 
@@ -606,27 +640,58 @@ local function start_event_listener(bufnr)
   if events_job then
     return
   end
+  local got_data = false
   local url = string.format("http://127.0.0.1:%d/events", server.port)
-  events_job = vim.fn.jobstart({ "curl", "-s", "-N", url }, {
+  local args = { "curl", "-s", "-N" }
+  if server.token then
+    table.insert(args, "-H")
+    table.insert(args, "X-Ipynb-Peek-Token: " .. server.token)
+  end
+  table.insert(args, url)
+  events_job = vim.fn.jobstart(args, {
     stdout_buffered = false,
     on_stdout = function(_, data)
       for _, line in ipairs(data) do
+        if line ~= "" then
+          got_data = true
+          events_backoff_ms = EVENTS_BACKOFF_BASE_MS
+          events_consecutive_failures = 0
+        end
         handle_event_line(bufnr, line)
       end
     end,
     on_exit = function()
       events_job = nil
-      if events_should_run then
-        vim.defer_fn(function()
-          start_event_listener(bufnr)
-        end, 500)
+      if not events_should_run then
+        return
       end
+      if not got_data then
+        events_consecutive_failures = events_consecutive_failures + 1
+        if events_consecutive_failures == EVENTS_WARN_AFTER_FAILURES then
+          vim.schedule(function()
+            vim.notify(
+              "[ipynb-peek] still can't reach the preview server after "
+                .. events_consecutive_failures
+                .. ' attempts - actions from the preview (e.g. "+ Code") won\'t reach Neovim '
+                .. "until it recovers. Still retrying in the background.",
+              vim.log.levels.WARN
+            )
+          end)
+        end
+      end
+      local delay = events_backoff_ms
+      events_backoff_ms = math.min(events_backoff_ms * 2, EVENTS_BACKOFF_MAX_MS)
+      vim.defer_fn(function()
+        start_event_listener(bufnr)
+      end, delay)
     end,
   })
 end
 
 local function stop_event_listener()
   events_should_run = false
+  events_backoff_ms = EVENTS_BACKOFF_BASE_MS
+  events_consecutive_failures = 0
   if events_job then
     vim.fn.jobstop(events_job)
     events_job = nil

@@ -30,6 +30,28 @@ let notebookPath: string | undefined
  */
 let wsClients = new Set<WebSocket>()
 
+/**
+ * Reassigned at the top of each createServer() call, from
+ * IPYNB_PEEK_TOKEN (set once by lua/ipynb-peek/server.lua when it spawns
+ * this server, a fresh random value per session). Guards every
+ * state-changing route and the /ws upgrade against any other page the
+ * user happens to have open in the same browser: without this, that page
+ * could POST to /execute (or open its own /ws) and run arbitrary code in
+ * the user's kernel purely by knowing/scanning the port - binding to
+ * 127.0.0.1 alone doesn't stop same-machine, cross-origin requests. Left
+ * unset (undefined) when the server is started directly - e.g. by the
+ * integration tests below, or a maintainer running `npm start` by hand -
+ * so auth is opt-in for those cases rather than a hard requirement.
+ */
+let authToken: string | undefined
+
+function isAuthorized(req: http.IncomingMessage, url: URL): boolean {
+  if (!authToken) return true
+  const header = req.headers["x-ipynb-peek-token"]
+  if (typeof header === "string" && header === authToken) return true
+  return url.searchParams.get("token") === authToken
+}
+
 function renderPayload(): string {
   return JSON.stringify({ type: "render", cells: currentCells })
 }
@@ -243,16 +265,22 @@ function serveAsset(res: http.ServerResponse, filename: string, contentType: str
 const themeCss = buildThemeCss(process.env.IPYNB_PEEK_THEME)
 
 /**
- * Injects the theme's `:root { --ipynb-x: ... }` block into index.html
- * before serving it, so the popup never renders with un-themed colors and
- * then flashes to the real ones - style.css's own var() fallbacks only
- * cover the "no theme configured at all" case.
+ * Injects the theme's `:root { --ipynb-x: ... }` block, and the auth token
+ * the page's own client.js needs to open its /ws connection, into
+ * index.html before serving it. Safe to embed unauthenticated: a
+ * cross-origin page can navigate/iframe this URL but can't read the
+ * response body or reach into the iframe's DOM (Same-Origin Policy), so
+ * the token never leaves this page's own JS context.
  */
 function serveIndexHtml(res: http.ServerResponse) {
   const html = readFileSync(new URL("./index.html", import.meta.url), "utf8")
-  const themed = html.replace("</head>", `<style>${themeCss}</style>\n</head>`)
+  const injected = html.replace(
+    "</head>",
+    `<style>${themeCss}</style>\n` +
+      `<script>window.__IPYNB_PEEK_TOKEN__=${JSON.stringify(authToken ?? "")}</script>\n</head>`,
+  )
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" })
-  res.end(themed)
+  res.end(injected)
 }
 
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse) {
@@ -269,6 +297,13 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     res.writeHead(200, { "content-type": "text/plain" })
     return res.end("ok")
   }
+
+  /**
+   * Everything below here changes state or exposes kernel access - gated
+   * on the shared token (see isAuthorized above) so no other page the user
+   * has open can drive it.
+   */
+  if (!isAuthorized(req, url)) return sendJson(res, 401, { ok: false, error: "unauthorized" })
 
   if (url.pathname === "/render" && req.method === "POST") {
     return handleJsonRoute(res, async () => {
@@ -368,8 +403,10 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
  */
 export function createServer(
   port: number = Number(process.env.IPYNB_PEEK_PORT ?? 0),
+  token: string | undefined = process.env.IPYNB_PEEK_TOKEN,
 ): Promise<{ port: number; stop: (force?: boolean) => void }> {
   wsClients = new Set()
+  authToken = token
 
   const httpServer = http.createServer((req, res) => {
     handleRequest(req, res).catch((error) => {
@@ -420,7 +457,7 @@ export function createServer(
 
   httpServer.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url ?? "/", "http://localhost")
-    if (url.pathname !== "/ws") {
+    if (url.pathname !== "/ws" || !isAuthorized(req, url)) {
       socket.destroy()
       return
     }
