@@ -1,10 +1,13 @@
 local M = {}
+local uv = vim.uv or vim.loop
 
 local server = require("ipynb-peek.server")
 local client = require("ipynb-peek.client")
 local cells = require("ipynb-peek.cells")
 local browser = require("ipynb-peek.browser")
 local status = require("ipynb-peek.status")
+local active_bufnr = nil
+local open_generation = 0
 
 --- Resolves the plugin's own install root from where this file was loaded,
 --- so server_dir needs no configuration regardless of which plugin manager
@@ -23,6 +26,7 @@ M.config = {
   debounce_ms = 60,
   cursor_debounce_ms = 50,
   sync_debounce_ms = 150,
+  startup_timeout_ms = 10000,
   window = { width = 900, height = 1000 },
   position = { x = 40, y = 40 },
   inline_status = true,
@@ -163,11 +167,22 @@ local function warn_if_unparseable(parsed)
 end
 
 local function require_server_ready()
-  if server.ready then
-    return true
+  if active_bufnr == nil then
+    vim.notify("[ipynb-peek] no notebook preview is open", vim.log.levels.WARN)
+    return false
   end
-  vim.notify("[ipynb-peek] server not ready", vim.log.levels.WARN)
-  return false
+  if active_bufnr ~= vim.api.nvim_get_current_buf() then
+    vim.notify(
+      "[ipynb-peek] this command belongs to the notebook with the active preview",
+      vim.log.levels.WARN
+    )
+    return false
+  end
+  if not server.ready then
+    vim.notify("[ipynb-peek] server not ready", vim.log.levels.WARN)
+    return false
+  end
+  return true
 end
 
 --- Moves the cursor to the first body line of `cell`, if one is given -
@@ -218,10 +233,7 @@ function M.run_cell(advance)
     nil,
     function(decoded)
       if not decoded.ok then
-        vim.notify(
-          "[ipynb-peek] execute error: " .. tostring(decoded.error),
-          vim.log.levels.ERROR
-        )
+        vim.notify("[ipynb-peek] execute error: " .. tostring(decoded.error), vim.log.levels.ERROR)
       end
     end
   )
@@ -329,6 +341,17 @@ local run_all_waiters = {}
 --- those apart; the generation can.
 local run_all_generation = 0
 
+local function cancel_run_all(message)
+  local had_waiters = next(run_all_waiters) ~= nil
+  run_all_generation = run_all_generation + 1
+  run_all_waiters = {}
+  if had_waiters and message then
+    vim.schedule(function()
+      vim.notify("[ipynb-peek] run all cancelled: " .. message, vim.log.levels.WARN)
+    end)
+  end
+end
+
 --- Runs every code cell in the buffer, top to bottom, stopping at the first
 --- one that errors (matching real Jupyter/VS Code's default "Run All").
 ---
@@ -426,6 +449,7 @@ function M.restart_kernel()
   if not require_server_ready() then
     return
   end
+  cancel_run_all("kernel was restarted")
   client.request(server.port, "/restart", "{}", nil, function(decoded)
     if decoded.ok then
       vim.notify("[ipynb-peek] kernel restarted", vim.log.levels.INFO)
@@ -446,10 +470,7 @@ function M.interrupt_kernel()
   end
   client.request(server.port, "/interrupt", "{}", nil, function(decoded)
     if not decoded.ok then
-      vim.notify(
-        "[ipynb-peek] interrupt error: " .. tostring(decoded.error),
-        vim.log.levels.ERROR
-      )
+      vim.notify("[ipynb-peek] interrupt error: " .. tostring(decoded.error), vim.log.levels.ERROR)
     end
   end)
 end
@@ -665,6 +686,7 @@ local function start_event_listener(bufnr)
       if not events_should_run then
         return
       end
+      cancel_run_all("event connection was lost")
       if not got_data then
         events_consecutive_failures = events_consecutive_failures + 1
         if events_consecutive_failures == EVENTS_WARN_AFTER_FAILURES then
@@ -704,8 +726,18 @@ end
 --- M.open/M.close on the shared module table at call time instead, by which
 --- point they exist.
 local KEYMAP_ACTIONS = {
-  open = { fn = function() M.open() end, desc = "ipynb-peek: open preview" },
-  close = { fn = function() M.close() end, desc = "ipynb-peek: close preview" },
+  open = {
+    fn = function()
+      M.open()
+    end,
+    desc = "ipynb-peek: open preview",
+  },
+  close = {
+    fn = function()
+      M.close()
+    end,
+    desc = "ipynb-peek: close preview",
+  },
   run_cell = { fn = M.run_cell, desc = "ipynb-peek: run cell" },
   run_cell_advance = {
     fn = M.run_cell_and_advance,
@@ -754,13 +786,14 @@ vim.api.nvim_create_autocmd({ "BufEnter", "BufWinEnter" }, {
 --- (see browser.lua) rather than going through :IpynbPeekClose, so if that
 --- happens this correctly-but-unhelpfully still thinks a preview is open -
 --- :IpynbPeekClose then :IpynbPeekOpen is the documented way out of that.
---- Deliberately does NOT guard opening a *different* buffer/notebook while
---- one is active - that's the larger, separate multi-notebook limitation
---- (the server/kernel are both global singletons), not what this prevents.
-local active_bufnr = nil
-
+--- A different notebook is rejected below because server/kernel state is a
+--- singleton; allowing it would mix cwd, persistence path, events, and cells.
 function M.open()
   local bufnr = vim.api.nvim_get_current_buf()
+  if not vim.api.nvim_buf_get_name(bufnr):match("%.ipynb$") then
+    vim.notify("[ipynb-peek] the current buffer is not an .ipynb notebook", vim.log.levels.ERROR)
+    return
+  end
   if active_bufnr == bufnr then
     vim.notify(
       "[ipynb-peek] preview already open for this notebook - "
@@ -769,9 +802,23 @@ function M.open()
     )
     return
   end
+  if active_bufnr ~= nil then
+    vim.notify(
+      "[ipynb-peek] a preview is already open for another notebook - "
+        .. "run :IpynbPeekClose there before opening this one",
+      vim.log.levels.ERROR
+    )
+    return
+  end
   active_bufnr = bufnr
+  open_generation = open_generation + 1
+  local generation = open_generation
 
-  server.start({ server_dir = M.config.server_dir, theme = M.config.theme })
+  if server.start({ server_dir = M.config.server_dir, theme = M.config.theme }) == false then
+    active_bufnr = nil
+    vim.notify("[ipynb-peek] " .. tostring(server.error), vim.log.levels.ERROR)
+    return
+  end
 
   --- Without this, calling M.open() again on a buffer that's already had it
   --- called before (close then reopen, or opening twice by accident) piles
@@ -841,25 +888,42 @@ function M.open()
 
   apply_keymaps(bufnr)
 
+  local started_at = uv.now()
   local function wait_ready()
+    if generation ~= open_generation or active_bufnr ~= bufnr then
+      return
+    end
     if server.ready then
       browser.open(server.url, M.config.window, M.config.position)
       start_event_listener(bufnr)
       warn_if_unparseable(cells.parse(bufnr))
       schedule_render(bufnr)
-    else
-      vim.defer_fn(wait_ready, 50)
+      return
     end
+    if server.error or uv.now() - started_at >= M.config.startup_timeout_ms then
+      local message = server.error
+        or ("preview server did not become ready within " .. M.config.startup_timeout_ms .. "ms")
+      M.close()
+      vim.notify("[ipynb-peek] " .. message, vim.log.levels.ERROR)
+      return
+    end
+    vim.defer_fn(wait_ready, 50)
   end
   wait_ready()
 end
 
 function M.close()
+  open_generation = open_generation + 1
+  cancel_run_all()
   if server.port then
     browser.close("ipynb-peek:" .. server.port)
   end
   stop_event_listener()
+  client.cancel_debounced()
   server.stop()
+  if active_bufnr and vim.api.nvim_buf_is_valid(active_bufnr) then
+    vim.api.nvim_buf_clear_namespace(active_bufnr, status_ns, 0, -1)
+  end
   active_bufnr = nil
 end
 

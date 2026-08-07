@@ -2,7 +2,7 @@ import { describe, test, expect, afterEach } from "vitest"
 import { mkdtempSync, readFileSync, rmSync, readdirSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { writeNotebookFile } from "./persist"
+import { updateNotebookFile, writeNotebookFile } from "./persist"
 
 const tmpDirs: string[] = []
 
@@ -68,5 +68,22 @@ describe("writeNotebookFile", () => {
       expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ a: 2 })
       expect(readdirSync(dir)).toEqual(["test.ipynb"])
     }
+  })
+})
+
+describe("updateNotebookFile", () => {
+  test("patches the newest file contents instead of replacing them with an old snapshot", async () => {
+    const dir = makeTmpDir()
+    const path = join(dir, "test.ipynb")
+    await writeNotebookFile(path, { cells: [{ source: ["new source"], outputs: [] }] })
+
+    await updateNotebookFile(path, (notebook) => {
+      notebook.cells[0].outputs = [{ output_type: "stream", name: "stdout", text: ["done"] }]
+    })
+
+    const saved = JSON.parse(readFileSync(path, "utf8"))
+    expect(saved.cells[0].source).toEqual(["new source"])
+    expect(saved.cells[0].outputs[0].text).toEqual(["done"])
+    expect(readdirSync(dir)).toEqual(["test.ipynb"])
   })
 })

@@ -3,6 +3,7 @@ import http from "node:http";
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { extname, resolve, sep } from "node:path";
 import readline from "node:readline";
 import { WebSocketServer, WebSocket } from "ws";
 
@@ -16,7 +17,12 @@ function stripAnsi(text) {
 }
 function renderOutput(output) {
   const data = output.data ?? {};
-  if (data["image/png"]) return { kind: "image", data: joinSource(data["image/png"]) };
+  if (data["image/png"])
+    return { kind: "image", mime: "image/png", data: joinSource(data["image/png"]) };
+  if (data["image/jpeg"])
+    return { kind: "image", mime: "image/jpeg", data: joinSource(data["image/jpeg"]) };
+  if (data["image/svg+xml"])
+    return { kind: "image", mime: "image/svg+xml", data: joinSource(data["image/svg+xml"]) };
   if (data["text/html"]) return { kind: "html", content: joinSource(data["text/html"]) };
   if (data["text/latex"]) return { kind: "latex", content: joinSource(data["text/latex"]) };
   if (output.output_type === "stream")
@@ -57,11 +63,13 @@ function renderNotebook(nb) {
     }
     cells.push({
       index,
+      id: typeof cell.id === "string" ? cell.id : void 0,
       cell_type: cell.cell_type,
       source,
       language: cell.cell_type === "code" ? language : void 0,
       execution_count: cell.cell_type === "code" ? cell.execution_count ?? null : void 0,
-      outputs
+      outputs,
+      nbformat_outputs: cell.cell_type === "code" && Array.isArray(cell.outputs) ? structuredClone(cell.outputs) : void 0
     });
   }
   return cells;
@@ -73,6 +81,7 @@ function mergeCells(previous, fresh) {
       return {
         ...cell,
         outputs: prevCell.outputs,
+        nbformat_outputs: prevCell.nbformat_outputs,
         execution_count: prevCell.execution_count,
         status: prevCell.status,
         started_at: prevCell.started_at,
@@ -83,11 +92,44 @@ function mergeCells(previous, fresh) {
   });
 }
 function syncCells(previous, live) {
+  const rows = Array.from({ length: previous.length + 1 }, () => new Uint16Array(live.length + 1));
+  for (let oldIndex2 = previous.length - 1; oldIndex2 >= 0; oldIndex2--) {
+    for (let liveIndex2 = live.length - 1; liveIndex2 >= 0; liveIndex2--) {
+      const exact = previous[oldIndex2].cell_type === live[liveIndex2].cell_type && previous[oldIndex2].source === live[liveIndex2].source;
+      rows[oldIndex2][liveIndex2] = exact ? rows[oldIndex2 + 1][liveIndex2 + 1] + 1 : Math.max(rows[oldIndex2 + 1][liveIndex2], rows[oldIndex2][liveIndex2 + 1]);
+    }
+  }
+  const anchors = [];
+  let oldIndex = 0;
+  let liveIndex = 0;
+  while (oldIndex < previous.length && liveIndex < live.length) {
+    if (previous[oldIndex].cell_type === live[liveIndex].cell_type && previous[oldIndex].source === live[liveIndex].source) {
+      anchors.push([oldIndex++, liveIndex++]);
+    } else if (rows[oldIndex + 1][liveIndex] >= rows[oldIndex][liveIndex + 1]) oldIndex++;
+    else liveIndex++;
+  }
+  const previousByLiveIndex = /* @__PURE__ */ new Map();
+  let previousStart = 0;
+  let liveStart = 0;
+  const allAnchors = [...anchors, [previous.length, live.length]];
+  for (const [previousAnchor, liveAnchor] of allAnchors) {
+    const previousGap = previousAnchor - previousStart;
+    const liveGap = liveAnchor - liveStart;
+    if (previousGap === liveGap) {
+      for (let offset = 0; offset < liveGap; offset++)
+        previousByLiveIndex.set(liveStart + offset, previous[previousStart + offset]);
+    }
+    if (previousAnchor < previous.length)
+      previousByLiveIndex.set(liveAnchor, previous[previousAnchor]);
+    previousStart = previousAnchor + 1;
+    liveStart = liveAnchor + 1;
+  }
   return live.map((liveCell, index) => {
-    const prevCell = previous[index];
+    const prevCell = previousByLiveIndex.get(index);
     if (prevCell) {
       return {
         ...prevCell,
+        index,
         cell_type: liveCell.cell_type,
         source: liveCell.source,
         language: liveCell.cell_type === "code" ? prevCell.language ?? "python" : void 0
@@ -99,7 +141,8 @@ function syncCells(previous, live) {
       source: liveCell.source,
       language: liveCell.cell_type === "code" ? "python" : void 0,
       execution_count: liveCell.cell_type === "code" ? null : void 0,
-      outputs: []
+      outputs: [],
+      nbformat_outputs: liveCell.cell_type === "code" ? [] : void 0
     };
   });
 }
@@ -114,7 +157,11 @@ function toNbformatOutput(output) {
     case "latex":
       return { output_type: "display_data", data: { "text/latex": [output.content] }, metadata: {} };
     case "image":
-      return { output_type: "display_data", data: { "image/png": output.data }, metadata: {} };
+      return {
+        output_type: "display_data",
+        data: { [output.mime ?? "image/png"]: output.data },
+        metadata: {}
+      };
     case "error":
       return {
         output_type: "error",
@@ -126,15 +173,26 @@ function toNbformatOutput(output) {
 }
 function patchNotebookOutputs(notebookJson, currentCells2) {
   const nbCells = Array.isArray(notebookJson?.cells) ? notebookJson.cells : [];
-  for (const cell of currentCells2) {
+  const usedNotebookIndices = /* @__PURE__ */ new Set();
+  for (let currentIndex = 0; currentIndex < currentCells2.length; currentIndex++) {
+    const cell = currentCells2[currentIndex];
     if (cell.cell_type !== "code") continue;
     if (cell.status === "busy") continue;
     if (cell.outputs.length === 0 && cell.execution_count == null) continue;
-    const nbCell = nbCells.find(
-      (candidate) => candidate.cell_type === "code" && joinSource(candidate.source) === cell.source
-    );
-    if (!nbCell) continue;
-    nbCell.outputs = cell.outputs.map(toNbformatOutput);
+    let notebookIndex = cell.id ? nbCells.findIndex((candidate) => candidate.id === cell.id) : -1;
+    const positionalCandidate = nbCells[currentIndex];
+    if (notebookIndex === -1 && !usedNotebookIndices.has(currentIndex) && positionalCandidate?.cell_type === "code" && joinSource(positionalCandidate.source) === cell.source) {
+      notebookIndex = currentIndex;
+    }
+    if (notebookIndex === -1) {
+      notebookIndex = nbCells.findIndex(
+        (candidate, index) => !usedNotebookIndices.has(index) && candidate.cell_type === "code" && joinSource(candidate.source) === cell.source
+      );
+    }
+    if (notebookIndex === -1 || usedNotebookIndices.has(notebookIndex)) continue;
+    const nbCell = nbCells[notebookIndex];
+    usedNotebookIndices.add(notebookIndex);
+    nbCell.outputs = cell.nbformat_outputs ? structuredClone(cell.nbformat_outputs) : cell.outputs.map(toNbformatOutput);
     nbCell.execution_count = cell.execution_count ?? null;
   }
   return notebookJson;
@@ -168,10 +226,28 @@ function applyStreamMessage(cell, content) {
     content: joinSource(content.text),
     stream: content.name === "stderr" ? "stderr" : "stdout"
   });
+  cell.nbformat_outputs ??= [];
+  const stream = content.name === "stderr" ? "stderr" : "stdout";
+  const text = joinSource(content.text);
+  const last = cell.nbformat_outputs[cell.nbformat_outputs.length - 1];
+  if (last?.output_type === "stream" && last.name === stream) {
+    last.text = [joinSource(last.text) + text];
+  } else {
+    cell.nbformat_outputs.push({ output_type: "stream", name: stream, text: [text] });
+  }
 }
 function applyResultMessage(cell, content, msgType) {
   const data = content.data ?? {};
-  if (data["image/png"]) cell.outputs.push({ kind: "image", data: joinSource(data["image/png"]) });
+  if (data["image/png"])
+    cell.outputs.push({ kind: "image", mime: "image/png", data: joinSource(data["image/png"]) });
+  else if (data["image/jpeg"])
+    cell.outputs.push({ kind: "image", mime: "image/jpeg", data: joinSource(data["image/jpeg"]) });
+  else if (data["image/svg+xml"])
+    cell.outputs.push({
+      kind: "image",
+      mime: "image/svg+xml",
+      data: joinSource(data["image/svg+xml"])
+    });
   else if (data["text/html"])
     cell.outputs.push({ kind: "html", content: joinSource(data["text/html"]) });
   else if (data["text/latex"])
@@ -182,15 +258,34 @@ function applyResultMessage(cell, content, msgType) {
     cell.outputs.push({ kind: "text", content: joinSource(data["text/plain"]) });
   if (msgType === "execute_result" && typeof content.execution_count === "number")
     cell.execution_count = content.execution_count;
+  cell.nbformat_outputs ??= [];
+  cell.nbformat_outputs.push({
+    output_type: msgType,
+    data: structuredClone(data),
+    metadata: structuredClone(content.metadata ?? {}),
+    ...msgType === "execute_result" ? { execution_count: content.execution_count ?? null } : {}
+  });
 }
 function applyErrorMessage(cell, content) {
   const traceback = Array.isArray(content.traceback) ? content.traceback.join("\n") : `${content.ename}: ${content.evalue}`;
   cell.outputs.push({ kind: "error", content: stripAnsi(traceback) });
+  cell.nbformat_outputs ??= [];
+  cell.nbformat_outputs.push({
+    output_type: "error",
+    ename: content.ename ?? "Error",
+    evalue: content.evalue ?? "",
+    traceback: Array.isArray(content.traceback) ? structuredClone(content.traceback) : [traceback]
+  });
 }
 function applyClearOutputMessage(cell) {
   cell.outputs = [];
+  cell.nbformat_outputs = [];
 }
 function resolveCellIndex(currentCells2, pending) {
+  if (pending.id) {
+    const idIndex = currentCells2.findIndex((cell) => cell.id === pending.id);
+    if (idIndex !== -1) return idIndex;
+  }
   if (currentCells2[pending.index]?.source === pending.source) return pending.index;
   const foundIndex = currentCells2.findIndex((cell) => cell.source === pending.source);
   return foundIndex === -1 ? null : foundIndex;
@@ -242,20 +337,36 @@ function handleIopub(parentId, msgType, content, currentCells2, pendingExecs2, o
 }
 
 // src/persist.ts
-import { writeFile, rename } from "node:fs/promises";
+import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 var writeQueues = /* @__PURE__ */ new Map();
-function writeNotebookFile(path, notebookJson) {
+function enqueueWrite(path, action) {
   const queued = (writeQueues.get(path) ?? Promise.resolve()).catch(() => {
-  }).then(async () => {
-    const tmpPath = `${path}.ipynb-peek.tmp`;
-    await writeFile(tmpPath, JSON.stringify(notebookJson, null, 1), "utf8");
-    await rename(tmpPath, path);
-  });
+  }).then(action);
   writeQueues.set(path, queued);
-  queued.finally(() => {
+  const cleanup = () => {
     if (writeQueues.get(path) === queued) writeQueues.delete(path);
-  });
+  };
+  void queued.then(cleanup, cleanup);
   return queued;
+}
+function updateNotebookFile(path, update) {
+  return enqueueWrite(path, async () => {
+    const tmpPath = `${path}.ipynb-peek.tmp`;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const original = await readFile(path, "utf8");
+      const notebookJson = JSON.parse(original);
+      update(notebookJson);
+      await writeFile(tmpPath, JSON.stringify(notebookJson, null, 1), "utf8");
+      const current = await readFile(path, "utf8");
+      if (current === original) {
+        await rename(tmpPath, path);
+        return;
+      }
+      await unlink(tmpPath).catch(() => {
+      });
+    }
+    throw new Error(`notebook kept changing while outputs were being persisted: ${path}`);
+  });
 }
 
 // src/themes.ts
@@ -371,20 +482,33 @@ function buildThemeCss(rawConfig) {
 
 // src/index.ts
 var currentCells = [];
-var currentNotebookJson = null;
 var notebookKernelName;
 var notebookDir;
 var notebookPath;
 var wsClients = /* @__PURE__ */ new Set();
 var authToken;
+function hasLoopbackHost(req) {
+  const host = req.headers.host;
+  if (!host) return false;
+  try {
+    const hostname = new URL(`http://${host}`).hostname;
+    return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]";
+  } catch {
+    return false;
+  }
+}
 function isAuthorized(req, url) {
   if (!authToken) return true;
   const header = req.headers["x-ipynb-peek-token"];
   if (typeof header === "string" && header === authToken) return true;
   return url.searchParams.get("token") === authToken;
 }
+function publicCell(cell) {
+  const { nbformat_outputs: _nbformatOutputs, ...visibleCell } = cell;
+  return visibleCell;
+}
 function renderPayload() {
-  return JSON.stringify({ type: "render", cells: currentCells });
+  return JSON.stringify({ type: "render", cells: currentCells.map(publicCell) });
 }
 function broadcast(payload) {
   for (const ws of wsClients) {
@@ -396,14 +520,29 @@ function broadcastFull() {
   emitEvent({ type: "cells_status", cells: currentCells.map(cellStatusInfo) });
 }
 function broadcastCell(index) {
-  broadcast(JSON.stringify({ type: "cell_update", index, cell: currentCells[index] }));
+  broadcast(JSON.stringify({ type: "cell_update", index, cell: publicCell(currentCells[index]) }));
   emitEvent({ type: "cell_status", ...cellStatusInfo(currentCells[index], index) });
 }
+function broadcastSync(previousCells) {
+  if (previousCells.length !== currentCells.length) {
+    broadcastFull();
+    return;
+  }
+  for (let index = 0; index < currentCells.length; index++) {
+    const previous = previousCells[index];
+    const current = currentCells[index];
+    if (previous.source !== current.source || previous.cell_type !== current.cell_type)
+      broadcastCell(index);
+  }
+}
 async function persistOutputsToDisk() {
-  if (!notebookPath || !currentNotebookJson) return;
+  if (!notebookPath) return;
   try {
-    patchNotebookOutputs(currentNotebookJson, currentCells);
-    await writeNotebookFile(notebookPath, currentNotebookJson);
+    const path = notebookPath;
+    const cellsSnapshot = structuredClone(currentCells);
+    await updateNotebookFile(path, (notebookJson) => {
+      patchNotebookOutputs(notebookJson, cellsSnapshot);
+    });
   } catch (error) {
     console.error("[ipynb-peek] failed to persist outputs to disk:", error);
   }
@@ -416,6 +555,7 @@ function emitEvent(event) {
 var bridgeProc = null;
 var kernelReadyPromise = null;
 var kernelReadyResolve = null;
+var kernelReadyReject = null;
 var pendingExecs = /* @__PURE__ */ new Map();
 function readLines(stream, onLine) {
   const rl = readline.createInterface({ input: stream });
@@ -424,16 +564,65 @@ function readLines(stream, onLine) {
   });
 }
 function writeToBridge(obj) {
-  bridgeProc?.stdin?.write(JSON.stringify(obj) + "\n");
+  if (!bridgeProc?.stdin?.writable) throw new Error("kernel bridge is not available");
+  bridgeProc.stdin.write(JSON.stringify(obj) + "\n");
+}
+function appendExecutionFailure(cell, message) {
+  cell.outputs.push({ kind: "error", content: message });
+  cell.nbformat_outputs ??= [];
+  cell.nbformat_outputs.push({
+    output_type: "error",
+    ename: "KernelError",
+    evalue: message,
+    traceback: [message]
+  });
+}
+function pendingCellIndex(pending) {
+  if (pending.id) {
+    const idIndex = currentCells.findIndex((cell) => cell.id === pending.id);
+    if (idIndex !== -1) return idIndex;
+  }
+  if (currentCells[pending.index]?.source === pending.source) return pending.index;
+  const sourceIndex = currentCells.findIndex((cell) => cell.source === pending.source);
+  return sourceIndex === -1 ? null : sourceIndex;
+}
+function failPendingExecutions(message) {
+  const updated = /* @__PURE__ */ new Set();
+  for (const pending of pendingExecs.values()) {
+    const index = pendingCellIndex(pending);
+    if (index === null || updated.has(index)) continue;
+    const cell = currentCells[index];
+    appendExecutionFailure(cell, message);
+    cell.status = "idle";
+    cell.duration_ms = cell.started_at ? Date.now() - cell.started_at : void 0;
+    updated.add(index);
+  }
+  pendingExecs.clear();
+  for (const index of updated) broadcastCell(index);
+}
+function failBridge(proc, message) {
+  if (bridgeProc !== proc) return;
+  kernelReadyReject?.(new Error(message));
+  kernelReadyResolve = null;
+  kernelReadyReject = null;
+  bridgeProc = null;
+  kernelReadyPromise = null;
+  try {
+    proc.kill();
+  } catch {
+  }
+  failPendingExecutions(message);
 }
 function startBridge(kernelName) {
   if (bridgeProc) return;
-  kernelReadyPromise = new Promise((resolve) => {
-    kernelReadyResolve = resolve;
+  kernelReadyPromise = new Promise((resolve2, reject) => {
+    kernelReadyResolve = resolve2;
+    kernelReadyReject = reject;
   });
   const bridgePath = fileURLToPath(new URL("./kernel-bridge.mjs", import.meta.url));
-  bridgeProc = spawn("node", [bridgePath]);
-  readLines(bridgeProc.stdout, (line) => {
+  const proc = spawn("node", [bridgePath]);
+  bridgeProc = proc;
+  readLines(proc.stdout, (line) => {
     let bridgeMessage;
     try {
       bridgeMessage = JSON.parse(line);
@@ -441,8 +630,11 @@ function startBridge(kernelName) {
       console.error("[kernel-bridge] received malformed line on stdout:", line, error);
       return;
     }
-    if (bridgeMessage.type === "ready") kernelReadyResolve?.();
-    else if (bridgeMessage.type === "iopub")
+    if (bridgeMessage.type === "ready") {
+      kernelReadyResolve?.();
+      kernelReadyResolve = null;
+      kernelReadyReject = null;
+    } else if (bridgeMessage.type === "iopub")
       handleIopub(
         bridgeMessage.parent_id,
         bridgeMessage.msg_type,
@@ -454,33 +646,57 @@ function startBridge(kernelName) {
           if (currentCells[index]?.status === "idle") void persistOutputsToDisk();
         }
       );
-    else if (bridgeMessage.type === "error") console.error("[kernel-bridge]", bridgeMessage.message);
-    else if (bridgeMessage.type === "kernel_exit")
-      console.error("[kernel-bridge] kernel process exited with code", bridgeMessage.code);
+    else if (bridgeMessage.type === "error") {
+      const message = String(bridgeMessage.message ?? "kernel bridge error");
+      if (bridgeMessage.operation === "start") failBridge(proc, message);
+      else if (bridgeMessage.operation === "execute" && bridgeMessage.id) {
+        const pending = pendingExecs.get(bridgeMessage.id);
+        if (pending) {
+          const index = pendingCellIndex(pending);
+          pendingExecs.delete(bridgeMessage.id);
+          if (index !== null) {
+            const cell = currentCells[index];
+            appendExecutionFailure(cell, message);
+            cell.status = "idle";
+            cell.duration_ms = cell.started_at ? Date.now() - cell.started_at : void 0;
+            broadcastCell(index);
+          }
+        }
+      } else console.error("[kernel-bridge]", message);
+    } else if (bridgeMessage.type === "kernel_exit") {
+      const detail = bridgeMessage.stderr ? `: ${bridgeMessage.stderr}` : "";
+      failBridge(proc, `kernel process exited with code ${bridgeMessage.code}${detail}`);
+    }
   });
-  bridgeProc.stdout.on(
-    "error",
-    (error) => console.error("[kernel-bridge] stdout reader failed:", error)
-  );
-  readLines(bridgeProc.stderr, (line) => {
+  proc.stdout.on("error", (error) => failBridge(proc, `kernel bridge stdout failed: ${error}`));
+  readLines(proc.stderr, (line) => {
     console.error("[kernel-bridge stderr]", line);
   });
-  bridgeProc.stderr.on("error", () => {
+  proc.stderr.on("error", () => {
+  });
+  proc.on("error", (error) => failBridge(proc, `failed to start kernel bridge: ${error.message}`));
+  proc.on("exit", (code, signal) => {
+    failBridge(proc, `kernel bridge exited (${signal ?? code ?? "unknown"})`);
   });
   writeToBridge({ cmd: "start", kernel_name: kernelName, cwd: notebookDir });
 }
 async function ensureKernelStarted(kernelName) {
   if (!bridgeProc) startBridge(kernelName);
-  await kernelReadyPromise;
+  const ready = kernelReadyPromise;
+  if (!ready) throw new Error("kernel bridge failed to initialize");
+  await ready;
 }
 function cleanupBridge() {
-  try {
-    bridgeProc?.kill();
-  } catch {
-  }
+  const proc = bridgeProc;
+  kernelReadyReject?.(new Error("kernel stopped"));
+  kernelReadyResolve = null;
+  kernelReadyReject = null;
   bridgeProc = null;
   kernelReadyPromise = null;
-  kernelReadyResolve = null;
+  try {
+    proc?.kill();
+  } catch {
+  }
   pendingExecs.clear();
 }
 process.on("exit", cleanupBridge);
@@ -497,10 +713,10 @@ function sendJson(res, status, body) {
   res.end(JSON.stringify(body));
 }
 function readBody(req) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve2, reject) => {
     let body = "";
     req.on("data", (chunk) => body += chunk);
-    req.on("end", () => resolve(body));
+    req.on("end", () => resolve2(body));
     req.on("error", reject);
   });
 }
@@ -520,19 +736,39 @@ function serveAsset(res, filename, contentType) {
 var themeCss = buildThemeCss(process.env.IPYNB_PEEK_THEME);
 function serveIndexHtml(res) {
   const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
-  const injected = html.replace(
-    "</head>",
-    `<style>${themeCss}</style>
-<script>window.__IPYNB_PEEK_TOKEN__=${JSON.stringify(authToken ?? "")}</script>
-</head>`
-  );
-  res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+  const injected = html.replace("__IPYNB_PEEK_TOKEN__", authToken ?? "");
+  res.writeHead(200, {
+    "content-type": "text/html; charset=utf-8",
+    "content-security-policy": [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: blob:",
+      "font-src 'self'",
+      "connect-src 'self' ws://127.0.0.1:*",
+      "object-src 'none'",
+      "base-uri 'none'",
+      "form-action 'none'",
+      "frame-ancestors 'none'"
+    ].join("; "),
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff"
+  });
   res.end(injected);
 }
 async function handleRequest(req, res) {
   const url = new URL(req.url ?? "/", "http://localhost");
+  if (!hasLoopbackHost(req)) return sendJson(res, 403, { ok: false, error: "invalid host header" });
   if (url.pathname === "/") return serveIndexHtml(res);
   if (url.pathname === "/style.css") return serveAsset(res, "style.css", "text/css; charset=utf-8");
+  if (url.pathname === "/theme.css") {
+    res.writeHead(200, { "content-type": "text/css; charset=utf-8" });
+    return res.end(themeCss);
+  }
+  if (url.pathname === "/katex.min.css")
+    return serveAsset(res, "katex.min.css", "text/css; charset=utf-8");
+  if (url.pathname.startsWith("/fonts/") && /^[a-zA-Z0-9_.-]+\.woff2$/.test(url.pathname.slice(7)))
+    return serveAsset(res, url.pathname.slice(1), "font/woff2");
   if (url.pathname === "/client.js")
     return serveAsset(res, "client.js", "text/javascript; charset=utf-8");
   if (url.pathname === "/health") {
@@ -540,6 +776,30 @@ async function handleRequest(req, res) {
     return res.end("ok");
   }
   if (!isAuthorized(req, url)) return sendJson(res, 401, { ok: false, error: "unauthorized" });
+  if (url.pathname === "/notebook-asset" && req.method === "GET") {
+    const requested = url.searchParams.get("path");
+    if (!notebookDir || !requested)
+      return sendJson(res, 404, { ok: false, error: "notebook asset not found" });
+    const root = resolve(notebookDir);
+    const assetPath = resolve(root, requested);
+    if (assetPath !== root && !assetPath.startsWith(root + sep))
+      return sendJson(res, 403, { ok: false, error: "asset path leaves notebook directory" });
+    const contentTypes = {
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".gif": "image/gif",
+      ".webp": "image/webp",
+      ".svg": "image/svg+xml"
+    };
+    try {
+      const contentType = contentTypes[extname(assetPath).toLowerCase()] ?? "application/octet-stream";
+      res.writeHead(200, { "content-type": contentType, "x-content-type-options": "nosniff" });
+      return res.end(readFileSync(assetPath));
+    } catch {
+      return sendJson(res, 404, { ok: false, error: "notebook asset not found" });
+    }
+  }
   if (url.pathname === "/render" && req.method === "POST") {
     return handleJsonRoute(res, async () => {
       const dirHeader = req.headers["x-notebook-dir"];
@@ -549,18 +809,19 @@ async function handleRequest(req, res) {
       const raw = await readBody(req);
       const nb = JSON.parse(raw);
       notebookKernelName = nb.metadata?.kernelspec?.name ?? notebookKernelName;
-      currentNotebookJson = nb;
       currentCells = mergeCells(currentCells, renderNotebook(nb));
       reconcileBusyStatus(currentCells, pendingExecs);
       broadcastFull();
+      await persistOutputsToDisk();
     });
   }
   if (url.pathname === "/sync" && req.method === "POST") {
     return handleJsonRoute(res, async () => {
       const body = JSON.parse(await readBody(req));
+      const previousCells = currentCells;
       currentCells = syncCells(currentCells, body.cells ?? []);
       reconcileBusyStatus(currentCells, pendingExecs);
-      broadcastFull();
+      broadcastSync(previousCells);
     });
   }
   if (url.pathname === "/execute" && req.method === "POST") {
@@ -568,17 +829,28 @@ async function handleRequest(req, res) {
       const body = JSON.parse(await readBody(req));
       const index = body.index;
       const code = body.code ?? "";
-      if (typeof index !== "number" || !currentCells[index])
+      if (typeof index !== "number" || typeof code !== "string" || currentCells[index]?.cell_type !== "code")
         return { status: 400, body: { ok: false, error: "invalid cell index" } };
       await ensureKernelStarted(notebookKernelName || "python3");
       const msgId = crypto.randomUUID();
-      pendingExecs.set(msgId, { index, source: currentCells[index].source });
+      currentCells[index].source = code;
+      pendingExecs.set(msgId, { index, id: currentCells[index].id, source: code });
       currentCells[index].outputs = [];
+      currentCells[index].nbformat_outputs = [];
       currentCells[index].status = "busy";
       currentCells[index].started_at = Date.now();
       currentCells[index].duration_ms = void 0;
       broadcastCell(index);
-      writeToBridge({ cmd: "execute", id: msgId, code });
+      try {
+        writeToBridge({ cmd: "execute", id: msgId, code });
+      } catch (error) {
+        pendingExecs.delete(msgId);
+        const message = String(error instanceof Error ? error.message : error);
+        appendExecutionFailure(currentCells[index], message);
+        currentCells[index].status = "idle";
+        broadcastCell(index);
+        throw error;
+      }
     });
   }
   if (url.pathname === "/restart" && req.method === "POST") {
@@ -590,6 +862,8 @@ async function handleRequest(req, res) {
     return sendJson(res, 200, { ok: true });
   }
   if (url.pathname === "/interrupt" && req.method === "POST") {
+    if (!bridgeProc)
+      return sendJson(res, 409, { ok: false, error: "no running kernel to interrupt" });
     return handleJsonRoute(res, async () => {
       writeToBridge({ cmd: "interrupt" });
     });
@@ -633,28 +907,24 @@ function createServer(port = Number(process.env.IPYNB_PEEK_PORT ?? 0), token = p
     ws.on("message", (data) => {
       try {
         const parsedMessage = JSON.parse(data.toString());
-        if (parsedMessage.type === "insert_cell") {
+        if (parsedMessage.type === "insert_cell" && Number.isInteger(parsedMessage.after_index) && parsedMessage.after_index >= -1 && (parsedMessage.cell_type === "code" || parsedMessage.cell_type === "markdown")) {
           emitEvent({
             type: "insert_cell",
             after_index: parsedMessage.after_index,
             cell_type: parsedMessage.cell_type
           });
-        } else if (parsedMessage.type === "delete_cell") {
+        } else if (parsedMessage.type === "delete_cell" && Number.isInteger(parsedMessage.index) && parsedMessage.index >= 0) {
           emitEvent({ type: "delete_cell", index: parsedMessage.index });
         }
       } catch (error) {
-        console.error(
-          "[ipynb-peek] received malformed websocket message from client:",
-          data,
-          error
-        );
+        console.error("[ipynb-peek] received malformed websocket message from client:", data, error);
       }
     });
     ws.on("close", () => wsClients.delete(ws));
   });
   httpServer.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url ?? "/", "http://localhost");
-    if (url.pathname !== "/ws" || !isAuthorized(req, url)) {
+    if (!hasLoopbackHost(req) || url.pathname !== "/ws" || !isAuthorized(req, url)) {
       socket.destroy();
       return;
     }
@@ -662,13 +932,16 @@ function createServer(port = Number(process.env.IPYNB_PEEK_PORT ?? 0), token = p
       wss.emit("connection", ws, req);
     });
   });
-  return new Promise((resolve) => {
+  return new Promise((resolve2, reject) => {
+    httpServer.once("error", reject);
     httpServer.listen(port, "127.0.0.1", () => {
+      httpServer.removeListener("error", reject);
       const address = httpServer.address();
       const actualPort = typeof address === "object" && address ? address.port : port;
-      resolve({
+      resolve2({
         port: actualPort,
         stop(force = false) {
+          cleanupBridge();
           if (force) {
             for (const ws of wsClients) ws.terminate();
             httpServer.closeAllConnections();

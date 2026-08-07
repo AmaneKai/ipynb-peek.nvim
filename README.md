@@ -18,6 +18,7 @@ Neovim isn't a great place to *look at* a notebook - cell outputs, images, rende
 - **Kernel restart on demand**, for the moment you `pip install`/`uv pip install` something new and the running kernel hasn't picked it up yet.
 - **Chromeless popup**, not a browser tab cluttering your normal browsing - a dedicated app-mode window, sized and positioned however you like.
 - **Themeable preview.** Built-in `dark`, `tokyonight`, `gruvbox`, and `rose-pine` presets, plus per-token color overrides and custom UI/monospace fonts and sizes - see `theme` in [Configuration](#configuration).
+- **Offline, self-contained frontend.** Markdown, syntax highlighting, math, and ANSI rendering are bundled with the plugin; the preview never executes JavaScript from a CDN.
 
 ## Prerequisites
 
@@ -228,6 +229,7 @@ require("ipynb-peek").setup({
   debounce_ms = 60,         -- full re-render on save (BufWritePost)
   cursor_debounce_ms = 50,  -- cursor-position scroll-sync
   sync_debounce_ms = 150,   -- live-typing sync (TextChanged/TextChangedI)
+  startup_timeout_ms = 10000, -- fail visibly instead of polling forever
 
   -- Popup window size and position (top-left corner).
   window = { width = 900, height = 1000 },
@@ -312,11 +314,13 @@ Override or disable any of these via `setup({ keymaps = { ... } })` - see [Confi
 
 Opening a `.ipynb` file with jupytext.vim active converts the buffer into a `# %%`-delimited Python view, not raw notebook JSON - ipynb-peek's own cell parser reads and writes that view directly for everything except the authoritative full re-render on save (which reads the real `.ipynb` JSON jupytext writes to disk).
 
+One preview may be active at a time. Opening another notebook while one is active is rejected with a clear message; close the current preview first. This prevents kernel, working-directory, cell-status, and persistence state from crossing notebook boundaries.
+
 A Node server handles the HTTP/WebSocket connection to the preview page. Actually running code needs to speak the real Jupyter wire protocol over ZeroMQ to an `ipykernel` process; that connection is owned by a *separate* Node child process (`kernel-bridge.mjs`) rather than folded into the main server, relaying messages over stdio - so a crash while managing kernel execution can never take down the live preview/render/sync path. Two processes, same runtime.
 
-`server/dist/` (what actually runs) is a prebuilt, committed-to-the-repo bundle - `npm install` only needs to fetch `zeromq`'s native binding and `ws`; there's no TypeScript build step on your end.
+`server/dist/` (what actually runs) is a prebuilt, committed-to-the-repo bundle - there is no TypeScript or frontend build step on your end. The browser libraries are compiled into that bundle; `zeromq` and `ws` remain runtime dependencies installed by the normal build hook.
 
-**Security.** The server binds to `127.0.0.1` only, and every request that changes state (running/interrupting/restarting the kernel, editing cells) requires a random per-session token that Neovim generates and passes to both the server and the preview page - no other page open in your browser can drive it just by finding the port. Rendered notebook output (rich/HTML cell outputs, Markdown) is inserted into the preview page unsanitized, the same trust model as Jupyter's own browser UI: don't run untrusted notebooks.
+**Security.** The server binds to `127.0.0.1` only, and every request that changes state (running/interrupting/restarting the kernel, editing cells) requires a cryptographically random per-session token that Neovim generates and passes to both the server and the preview page. Browser dependencies are bundled locally and the page uses a restrictive Content Security Policy, so it does not grant kernel authority to runtime CDN scripts. Rendered notebook output (rich/HTML cell outputs, Markdown) is inserted into the preview page unsanitized, the same trust model as Jupyter's own browser UI: don't run untrusted notebooks.
 
 ## Troubleshooting
 
@@ -325,6 +329,8 @@ A Node server handles the HTTP/WebSocket connection to the preview page. Actuall
 **Why are there two `node` processes running?** See [How it works](#how-it-works) above - the server and the kernel bridge are kept as separate processes on purpose, for fault isolation. Expected, not a bug.
 
 **My kernel isn't seeing a package I just installed (`pip install` / `uv pip install`).** A running kernel process doesn't pick up newly installed packages. Run `:IpynbPeekRestartKernel` after installing something new into the notebook's venv.
+
+**The notebook's kernelspec was not found, or its executable is unavailable.** ipynb-peek deliberately does not fall back to a different Python environment: silently running code in the wrong environment is unsafe. Activate the intended environment before starting Neovim, or re-register it with `python -m ipykernel install --user --name <name>`. `:checkhealth ipynb-peek` reports kernelspecs whose configured executable is not available on Neovim's `PATH`.
 
 **`:IpynbPeekInterruptKernel` says interrupt isn't supported.** Windows has no real POSIX signals - sending one would silently kill the kernel process rather than interrupt it, leaving the plugin unable to recover without a manual restart. Rather than risk that, it refuses on Windows and tells you to use `:IpynbPeekRestartKernel` instead (loses kernel state, unlike a real interrupt). Interrupt works normally on macOS/Linux.
 
@@ -336,19 +342,20 @@ A Node server handles the HTTP/WebSocket connection to the preview page. Actuall
 
 ## Development
 
-There are two test suites - one for the Lua plugin, one for the Node server:
+There are Lua and Node unit/integration suites plus a real-kernel end-to-end suite:
 
 ```sh
-make test        # both
+make test         # Lua + server unit/integration suites
 make testlua      # lua/ - plenary.nvim, headless Neovim
 make testserver   # server/ - vitest
+make teste2e      # real registered Jupyter kernel + localhost server
 ```
 
-`make testlua` vendors a throwaway `plenary.nvim` clone into `.tests/` (gitignored) if one isn't already on your machine, so it works the same locally and in CI. Both suites run on every push/PR via GitHub Actions (`.github/workflows/ci.yml`).
+`make testlua` vendors a throwaway `plenary.nvim` clone into `.tests/` (gitignored) if one isn't already on your machine, so it works the same locally and in CI. All three suites run on every push/PR via GitHub Actions (`.github/workflows/ci.yml`).
 
-The Lua tests cover `cells.lua`'s buffer parsing directly against real scratch buffers, `status.lua`'s pure icon/virtual-text formatting for the in-buffer status signs, and the cell-jump motions in `init.lua` against real scratch buffers/windows (with `server.lua`/`browser.lua`/`client.lua` stubbed out, since those commands are pure buffer navigation with no server involved). The server tests cover the pure notebook-rendering/merge/sync logic (`notebook.ts`), the Jupyter iopub message handling (`iopub.ts`), the wire-protocol framing (`wire-protocol.mjs`), and the HTTP/WebSocket routing layer (including a real `/ws` connection) against a real server instance on a random port. Deliberately not covered by CI: anything that needs a live Jupyter kernel or a real browser popup - those are exercised by hand against a real kernel before a release, not automated.
+The Lua tests cover `cells.lua`'s buffer parsing directly against real scratch buffers, `status.lua`'s pure icon/virtual-text formatting for the in-buffer status signs, and the cell-jump motions in `init.lua` against real scratch buffers/windows. The server tests cover notebook rendering/identity/sync, iopub handling, persistence, wire framing, authentication, local assets, and the HTTP/WebSocket layer. CI also launches a disposable real ipykernel and verifies the full edit → execute → stream → save → persisted-output workflow. The real browser popup and OS-specific window management remain manual tests.
 
-`server/dist/` is committed to the repo, not generated at install time - after changing anything in `server/src`, run `make build` and commit the result. `make checkbuild` (also run in CI) fails if a rebuild was needed but forgotten.
+`server/dist/` is committed to the repo, not generated at install time - after changing anything in `server/src`, run `make build` and commit the result. `make checkbuild` (also run in CI) fails if a rebuild was needed but forgotten. The build also regenerates `server/dist/THIRD_PARTY_NOTICES.txt` for the bundled frontend dependencies.
 
 ## License
 

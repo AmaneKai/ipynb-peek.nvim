@@ -24,6 +24,12 @@ jobs:
         with:
           node-version: 22
       - run: make testserver
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install ipykernel jupyter-core
+      - run: python -m ipykernel install --user --name ipynb-peek-e2e
+      - run: cd server && IPYNB_PEEK_E2E_KERNEL=ipynb-peek-e2e npm run test:e2e
       # server/dist/ is committed, not built at install time - fails if a
       # change to server/src wasn't followed by `make build` before commit.
       - run: make checkbuild

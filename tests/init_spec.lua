@@ -1,11 +1,25 @@
 --- Stubbed before requiring ipynb-peek itself, so M.jump_to_next_cell/
 --- M.jump_to_previous_cell (pure buffer navigation, no server involved) can
 --- be exercised without spawning a real server/browser/curl process.
-package.loaded["ipynb-peek.server"] =
-  { port = 1, ready = false, url = nil, start = function() end, stop = function() end }
+local server_start_calls = 0
+local server_stub = {
+  port = 1,
+  ready = false,
+  url = nil,
+  start = function()
+    server_start_calls = server_start_calls + 1
+    return true
+  end,
+  stop = function() end,
+}
+package.loaded["ipynb-peek.server"] = server_stub
 package.loaded["ipynb-peek.browser"] =
   { find = function() end, open = function() end, close = function() end }
-package.loaded["ipynb-peek.client"] = { request = function() end, debounced_request = function() end }
+package.loaded["ipynb-peek.client"] = {
+  request = function() end,
+  debounced_request = function() end,
+  cancel_debounced = function() end,
+}
 
 local M = require("ipynb-peek")
 
@@ -137,14 +151,17 @@ describe("M.jump_to_next_cell / M.jump_to_previous_cell", function()
       assert.are.equal(4, vim.api.nvim_win_get_cursor(0)[1]) -- cell1, the first code cell
     end)
 
-    it("jumps into the first code cell when the cursor starts above all markers, skipping a leading markdown cell", function()
-      make_buffer(vim.list_extend({ "# leading comment" }, mixed))
-      vim.api.nvim_win_set_cursor(0, { 1, 0 })
+    it(
+      "jumps into the first code cell when the cursor starts above all markers, skipping a leading markdown cell",
+      function()
+        make_buffer(vim.list_extend({ "# leading comment" }, mixed))
+        vim.api.nvim_win_set_cursor(0, { 1, 0 })
 
-      M.jump_to_next_cell()
+        M.jump_to_next_cell()
 
-      assert.are.equal(5, vim.api.nvim_win_get_cursor(0)[1]) -- cell1 (code), one line later than `mixed` alone
-    end)
+        assert.are.equal(5, vim.api.nvim_win_get_cursor(0)[1]) -- cell1 (code), one line later than `mixed` alone
+      end
+    )
 
     it("skips a markdown cell going backward too", function()
       make_buffer(mixed)
@@ -154,5 +171,27 @@ describe("M.jump_to_next_cell / M.jump_to_previous_cell", function()
 
       assert.are.equal(4, vim.api.nvim_win_get_cursor(0)[1]) -- cell1, not cell2
     end)
+  end)
+end)
+
+describe("M.open notebook isolation", function()
+  it("rejects a second notebook instead of sharing singleton server state", function()
+    local first = make_buffer({ "# %%", "1" })
+    vim.api.nvim_buf_set_name(first, vim.fn.tempname() .. ".ipynb")
+    M.open()
+
+    local second = make_buffer({ "# %%", "2" })
+    vim.api.nvim_buf_set_name(second, vim.fn.tempname() .. ".ipynb")
+    local notifications = {}
+    local original_notify = vim.notify
+    vim.notify = function(message)
+      table.insert(notifications, message)
+    end
+    M.open()
+    vim.notify = original_notify
+
+    assert.are.equal(1, server_start_calls)
+    assert.is_true(notifications[1]:find("already open for another notebook", 1, true) ~= nil)
+    M.close()
   end)
 end)

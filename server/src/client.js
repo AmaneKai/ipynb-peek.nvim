@@ -1,6 +1,11 @@
-import { AnsiUp } from "https://cdn.jsdelivr.net/npm/ansi_up@6.0.6/+esm"
+import { AnsiUp } from "ansi_up"
+import hljs from "highlight.js/lib/core"
+import python from "highlight.js/lib/languages/python"
+import renderMathInElement from "katex/contrib/auto-render"
+import { marked } from "marked"
 
 const ansiUp = new AnsiUp()
+hljs.registerLanguage("python", python)
 
 ;(function () {
   /**
@@ -11,6 +16,7 @@ const ansiUp = new AnsiUp()
   document.title = "ipynb-peek:" + location.port
 
   const container = document.getElementById("notebook")
+  const sessionToken = document.querySelector('meta[name="ipynb-peek-token"]')?.content || ""
   const cellEls = []
   const cellTimers = []
 
@@ -34,8 +40,6 @@ const ansiUp = new AnsiUp()
    * Jupyter's own markdown-it + katex renderer is ordered.
    */
   function renderMath(container) {
-    if (!window.renderMathInElement) return
-
     try {
       renderMathInElement(container, {
         delimiters: [
@@ -61,19 +65,33 @@ const ansiUp = new AnsiUp()
     return (milliseconds / 1000).toFixed(1) + "s"
   }
 
+  function localizeImages(root) {
+    for (const img of root.querySelectorAll("img[src]")) {
+      const src = img.getAttribute("src") || ""
+      if (!src || /^(?:[a-z]+:|\/\/|#|data:)/i.test(src)) continue
+      const query = new URLSearchParams({ path: src, token: sessionToken })
+      img.src = "/notebook-asset?" + query
+    }
+  }
+
   function renderOutputs(outputs) {
     const wrap = document.createElement("div")
     wrap.className = "outputs"
     for (const out of outputs || []) {
       if (out.kind === "image") {
         const img = document.createElement("img")
-        img.src = "data:image/png;base64," + out.data
+        const mime = out.mime || "image/png"
+        img.src =
+          mime === "image/svg+xml"
+            ? "data:image/svg+xml;charset=utf-8," + encodeURIComponent(out.data)
+            : `data:${mime};base64,${out.data}`
         img.addEventListener("click", () => openLightbox(img.src))
         wrap.appendChild(img)
       } else if (out.kind === "html") {
         const div = document.createElement("div")
         div.className = "table-scroll"
         div.innerHTML = out.content
+        localizeImages(div)
         wrap.appendChild(div)
       } else if (out.kind === "latex") {
         const div = document.createElement("div")
@@ -115,6 +133,7 @@ const ansiUp = new AnsiUp()
       el.classList.add("md-cell")
       const content = document.createElement("div")
       content.innerHTML = marked.parse(cell.source || "")
+      localizeImages(content)
       renderMath(content)
       el.appendChild(content)
     } else if (cell.cell_type === "code") {
@@ -247,8 +266,7 @@ const ansiUp = new AnsiUp()
   let currentWs = null
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws"
-    const token = window.__IPYNB_PEEK_TOKEN__
-    const query = token ? "?token=" + encodeURIComponent(token) : ""
+    const query = sessionToken ? "?token=" + encodeURIComponent(sessionToken) : ""
     const ws = new WebSocket(proto + "://" + location.host + "/ws" + query)
     currentWs = ws
     ws.onopen = () => {

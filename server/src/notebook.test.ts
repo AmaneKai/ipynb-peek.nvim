@@ -41,7 +41,7 @@ describe("stripAnsi", () => {
 describe("renderOutput", () => {
   test("prefers an image over text/html when both are present", () => {
     const output = { data: { "image/png": "base64data", "text/html": "<b>x</b>" } }
-    expect(renderOutput(output)).toEqual({ kind: "image", data: "base64data" })
+    expect(renderOutput(output)).toEqual({ kind: "image", mime: "image/png", data: "base64data" })
   })
 
   test("renders a stream output as text, tagged with its stream name", () => {
@@ -151,6 +151,9 @@ describe("renderNotebook", () => {
 
     expect(cells[0].execution_count).toBe(3)
     expect(cells[0].outputs).toEqual([{ kind: "text", content: "2", stream: "stdout" }])
+    expect(cells[0].nbformat_outputs).toEqual([
+      { output_type: "stream", name: "stdout", text: ["2"] },
+    ])
   })
 
   test("merges consecutive same-stream stream outputs into one entry", () => {
@@ -247,6 +250,43 @@ describe("syncCells", () => {
       outputs: [],
     })
   })
+
+  test("keeps stable IDs and outputs with their cells when a cell is inserted", () => {
+    const previous: RenderedCell[] = [
+      {
+        index: 0,
+        id: "a",
+        cell_type: "code",
+        source: "a()",
+        outputs: [{ kind: "text", content: "A" }],
+      },
+      {
+        index: 1,
+        id: "b",
+        cell_type: "code",
+        source: "b()",
+        outputs: [{ kind: "text", content: "B" }],
+      },
+    ]
+    const synced = syncCells(previous, [
+      { cell_type: "code", source: "new()" },
+      { cell_type: "code", source: "a()" },
+      { cell_type: "code", source: "b()" },
+    ])
+
+    expect(synced[0].id).toBeUndefined()
+    expect(synced[0].outputs).toEqual([])
+    expect(synced[1]).toMatchObject({ id: "a", index: 1, outputs: [{ content: "A" }] })
+    expect(synced[2]).toMatchObject({ id: "b", index: 2, outputs: [{ content: "B" }] })
+  })
+
+  test("keeps identity across a normal source edit", () => {
+    const previous: RenderedCell[] = [
+      { index: 0, id: "a", cell_type: "code", source: "old", outputs: [] },
+    ]
+    const synced = syncCells(previous, [{ cell_type: "code", source: "edited" }])
+    expect(synced[0]).toMatchObject({ id: "a", index: 0, source: "edited" })
+  })
 })
 
 describe("toNbformatOutput", () => {
@@ -265,7 +305,7 @@ describe("toNbformatOutput", () => {
   })
 
   test("renders an image output as display_data with image/png data", () => {
-    const output = toNbformatOutput({ kind: "image", data: "base64data" })
+    const output = toNbformatOutput({ kind: "image", mime: "image/png", data: "base64data" })
     expect(output).toEqual({
       output_type: "display_data",
       data: { "image/png": "base64data" },
@@ -347,6 +387,59 @@ describe("patchNotebookOutputs", () => {
 
     expect(notebookJson.cells[0].outputs).toEqual([])
     expect(notebookJson.cells[0].execution_count).toBeNull()
+  })
+
+  test("uses stable cell IDs when identical source appears more than once", () => {
+    const notebookJson: any = {
+      cells: [
+        { id: "first", cell_type: "code", source: ["x"], outputs: [], execution_count: null },
+        { id: "second", cell_type: "code", source: ["x"], outputs: [], execution_count: null },
+      ],
+    }
+    const cells = [
+      makeCell({ id: "first", source: "x", outputs: [{ kind: "text", content: "one" }] }),
+      makeCell({ id: "second", source: "x", outputs: [{ kind: "text", content: "two" }] }),
+    ]
+
+    patchNotebookOutputs(notebookJson, cells)
+
+    expect(notebookJson.cells[0].outputs[0].data["text/plain"]).toEqual(["one"])
+    expect(notebookJson.cells[1].outputs[0].data["text/plain"]).toEqual(["two"])
+  })
+
+  test("does not collapse duplicate legacy cells onto the first source match", () => {
+    const notebookJson: any = {
+      cells: [
+        { cell_type: "code", source: ["x"], outputs: [], execution_count: null },
+        { cell_type: "code", source: ["x"], outputs: [], execution_count: null },
+      ],
+    }
+    const cells = [
+      makeCell({ source: "x", outputs: [{ kind: "text", content: "one" }] }),
+      makeCell({ index: 1, source: "x", outputs: [{ kind: "text", content: "two" }] }),
+    ]
+
+    patchNotebookOutputs(notebookJson, cells)
+
+    expect(notebookJson.cells[0].outputs[0].data["text/plain"]).toEqual(["one"])
+    expect(notebookJson.cells[1].outputs[0].data["text/plain"]).toEqual(["two"])
+  })
+
+  test("persists the exact MIME bundle and metadata retained from Jupyter", () => {
+    const exactOutput = {
+      output_type: "execute_result",
+      execution_count: 4,
+      data: { "text/html": "<b>42</b>", "text/plain": "42" },
+      metadata: { isolated: true },
+    }
+    const notebookJson: any = {
+      cells: [{ id: "a", cell_type: "code", source: ["x"], outputs: [] }],
+    }
+    patchNotebookOutputs(notebookJson, [
+      makeCell({ id: "a", source: "x", nbformat_outputs: [exactOutput], execution_count: 4 }),
+    ])
+
+    expect(notebookJson.cells[0].outputs).toEqual([exactOutput])
   })
 })
 

@@ -1,12 +1,13 @@
 export type CellOutput =
   | { kind: "text"; content: string; stream?: "stdout" | "stderr" }
   | { kind: "error"; content: string }
-  | { kind: "image"; data: string }
+  | { kind: "image"; data: string; mime?: "image/png" | "image/jpeg" | "image/svg+xml" }
   | { kind: "html"; content: string }
   | { kind: "latex"; content: string }
 
 export type RenderedCell = {
   index: number
+  id?: string
   cell_type: "markdown" | "code" | "raw"
   source: string
   language?: string
@@ -15,6 +16,8 @@ export type RenderedCell = {
   started_at?: number
   duration_ms?: number
   outputs: CellOutput[]
+  /** Exact nbformat/iopub objects retained for lossless persistence. */
+  nbformat_outputs?: any[]
 }
 
 export function joinSource(src: string | string[] | undefined): string {
@@ -30,7 +33,14 @@ export function stripAnsi(text: string): string {
 export function renderOutput(output: any): CellOutput | null {
   const data = output.data ?? {}
 
-  if (data["image/png"]) return { kind: "image", data: joinSource(data["image/png"]) }
+  if (data["image/png"])
+    return { kind: "image", mime: "image/png", data: joinSource(data["image/png"]) }
+
+  if (data["image/jpeg"])
+    return { kind: "image", mime: "image/jpeg", data: joinSource(data["image/jpeg"]) }
+
+  if (data["image/svg+xml"])
+    return { kind: "image", mime: "image/svg+xml", data: joinSource(data["image/svg+xml"]) }
 
   if (data["text/html"]) return { kind: "html", content: joinSource(data["text/html"]) }
 
@@ -100,11 +110,16 @@ export function renderNotebook(nb: any): RenderedCell[] {
 
     cells.push({
       index,
+      id: typeof cell.id === "string" ? cell.id : undefined,
       cell_type: cell.cell_type,
       source,
       language: cell.cell_type === "code" ? language : undefined,
       execution_count: cell.cell_type === "code" ? (cell.execution_count ?? null) : undefined,
       outputs,
+      nbformat_outputs:
+        cell.cell_type === "code" && Array.isArray(cell.outputs)
+          ? structuredClone(cell.outputs)
+          : undefined,
     })
   }
 
@@ -129,6 +144,7 @@ export function mergeCells(previous: RenderedCell[], fresh: RenderedCell[]): Ren
       return {
         ...cell,
         outputs: prevCell.outputs,
+        nbformat_outputs: prevCell.nbformat_outputs,
         execution_count: prevCell.execution_count,
         status: prevCell.status,
         started_at: prevCell.started_at,
@@ -151,11 +167,58 @@ export function syncCells(
   previous: RenderedCell[],
   live: { cell_type: "code" | "markdown"; source: string }[],
 ): RenderedCell[] {
+  // Exact source/type matches form stable anchors. Unmatched one-to-one gaps
+  // between them are ordinary edits and keep identity positionally; unequal
+  // gaps represent insertion/deletion and deliberately stay fresh rather
+  // than borrowing another cell's ID or execution state.
+  const rows = Array.from({ length: previous.length + 1 }, () => new Uint16Array(live.length + 1))
+  for (let oldIndex = previous.length - 1; oldIndex >= 0; oldIndex--) {
+    for (let liveIndex = live.length - 1; liveIndex >= 0; liveIndex--) {
+      const exact =
+        previous[oldIndex].cell_type === live[liveIndex].cell_type &&
+        previous[oldIndex].source === live[liveIndex].source
+      rows[oldIndex][liveIndex] = exact
+        ? rows[oldIndex + 1][liveIndex + 1] + 1
+        : Math.max(rows[oldIndex + 1][liveIndex], rows[oldIndex][liveIndex + 1])
+    }
+  }
+
+  const anchors: Array<[number, number]> = []
+  let oldIndex = 0
+  let liveIndex = 0
+  while (oldIndex < previous.length && liveIndex < live.length) {
+    if (
+      previous[oldIndex].cell_type === live[liveIndex].cell_type &&
+      previous[oldIndex].source === live[liveIndex].source
+    ) {
+      anchors.push([oldIndex++, liveIndex++])
+    } else if (rows[oldIndex + 1][liveIndex] >= rows[oldIndex][liveIndex + 1]) oldIndex++
+    else liveIndex++
+  }
+
+  const previousByLiveIndex = new Map<number, RenderedCell>()
+  let previousStart = 0
+  let liveStart = 0
+  const allAnchors: Array<[number, number]> = [...anchors, [previous.length, live.length]]
+  for (const [previousAnchor, liveAnchor] of allAnchors) {
+    const previousGap = previousAnchor - previousStart
+    const liveGap = liveAnchor - liveStart
+    if (previousGap === liveGap) {
+      for (let offset = 0; offset < liveGap; offset++)
+        previousByLiveIndex.set(liveStart + offset, previous[previousStart + offset])
+    }
+    if (previousAnchor < previous.length)
+      previousByLiveIndex.set(liveAnchor, previous[previousAnchor])
+    previousStart = previousAnchor + 1
+    liveStart = liveAnchor + 1
+  }
+
   return live.map((liveCell, index) => {
-    const prevCell = previous[index]
+    const prevCell = previousByLiveIndex.get(index)
     if (prevCell) {
       return {
         ...prevCell,
+        index,
         cell_type: liveCell.cell_type,
         source: liveCell.source,
         language: liveCell.cell_type === "code" ? (prevCell.language ?? "python") : undefined,
@@ -168,19 +231,16 @@ export function syncCells(
       language: liveCell.cell_type === "code" ? "python" : undefined,
       execution_count: liveCell.cell_type === "code" ? null : undefined,
       outputs: [],
+      nbformat_outputs: liveCell.cell_type === "code" ? [] : undefined,
     }
   })
 }
 
 /**
- * Reverses renderOutput's simplification back into a best-effort nbformat
- * output object, so execution results can be written back into the real
- * .ipynb file. Not a byte-perfect round-trip: stream outputs keep their
- * exact output_type/name, but execute_result/display_data/image/latex all
- * collapse to display_data, since CellOutput doesn't retain which iopub
- * message type an output originally came from. nbconvert and other tools
- * render execute_result/display_data identically either way - the only
- * loss is the "Out[n]:" prompt label on the cell's own return value.
+ * Reverses renderOutput's simplified browser model into a best-effort
+ * nbformat output object. Live executions keep their exact raw nbformat
+ * messages separately; this is only the fallback for older/in-memory cells
+ * that do not have that lossless copy.
  */
 export function toNbformatOutput(output: CellOutput): any {
   switch (output.kind) {
@@ -193,7 +253,11 @@ export function toNbformatOutput(output: CellOutput): any {
     case "latex":
       return { output_type: "display_data", data: { "text/latex": [output.content] }, metadata: {} }
     case "image":
-      return { output_type: "display_data", data: { "image/png": output.data }, metadata: {} }
+      return {
+        output_type: "display_data",
+        data: { [output.mime ?? "image/png"]: output.data },
+        metadata: {},
+      }
     case "error":
       return {
         output_type: "error",
@@ -209,29 +273,48 @@ export function toNbformatOutput(output: CellOutput): any {
  * matching cells, in place, so jupytext.vim's own --update save mode (which
  * preserves existing outputs for any cell whose source hasn't changed) can
  * keep them around on every subsequent save. Matches cells by searching for
- * matching source text rather than trusting array position, for the same
- * reason resolveCellIndex does in iopub.ts - positions drift under
- * live-typing sync. A cell with no match on disk (deleted, or the notebook
- * hasn't been saved since it was added), or with source text duplicated
- * elsewhere in the notebook, is a known, inherent limitation without stable
- * cell identity - skipped, or best-effort first-match, respectively, rather
- * than guessed at riskily.
+ * stable nbformat cell ID first. Older notebooks may not have IDs, so the
+ * fallback uses an unused same-position/source match and finally an unused
+ * source match. Tracking used notebook positions is important: two identical
+ * code cells must never both overwrite the first matching cell.
  */
 export function patchNotebookOutputs(notebookJson: any, currentCells: RenderedCell[]): any {
   const nbCells = Array.isArray(notebookJson?.cells) ? notebookJson.cells : []
+  const usedNotebookIndices = new Set<number>()
 
-  for (const cell of currentCells) {
+  for (let currentIndex = 0; currentIndex < currentCells.length; currentIndex++) {
+    const cell = currentCells[currentIndex]
     if (cell.cell_type !== "code") continue
     if (cell.status === "busy") continue
     if (cell.outputs.length === 0 && cell.execution_count == null) continue
 
-    const nbCell = nbCells.find(
-      (candidate: any) =>
-        candidate.cell_type === "code" && joinSource(candidate.source) === cell.source,
-    )
-    if (!nbCell) continue
+    let notebookIndex = cell.id
+      ? nbCells.findIndex((candidate: any) => candidate.id === cell.id)
+      : -1
+    const positionalCandidate = nbCells[currentIndex]
+    if (
+      notebookIndex === -1 &&
+      !usedNotebookIndices.has(currentIndex) &&
+      positionalCandidate?.cell_type === "code" &&
+      joinSource(positionalCandidate.source) === cell.source
+    ) {
+      notebookIndex = currentIndex
+    }
+    if (notebookIndex === -1) {
+      notebookIndex = nbCells.findIndex(
+        (candidate: any, index: number) =>
+          !usedNotebookIndices.has(index) &&
+          candidate.cell_type === "code" &&
+          joinSource(candidate.source) === cell.source,
+      )
+    }
+    if (notebookIndex === -1 || usedNotebookIndices.has(notebookIndex)) continue
 
-    nbCell.outputs = cell.outputs.map(toNbformatOutput)
+    const nbCell = nbCells[notebookIndex]
+    usedNotebookIndices.add(notebookIndex)
+    nbCell.outputs = cell.nbformat_outputs
+      ? structuredClone(cell.nbformat_outputs)
+      : cell.outputs.map(toNbformatOutput)
     nbCell.execution_count = cell.execution_count ?? null
   }
 

@@ -7,6 +7,7 @@ import { joinSource, stripAnsi, appendOutput, type RenderedCell } from "./notebo
  */
 export type PendingExec = {
   index: number
+  id?: string
   source: string
 }
 
@@ -35,12 +36,30 @@ export function applyStreamMessage(cell: RenderedCell, content: any) {
     content: joinSource(content.text),
     stream: content.name === "stderr" ? "stderr" : "stdout",
   })
+  cell.nbformat_outputs ??= []
+  const stream = content.name === "stderr" ? "stderr" : "stdout"
+  const text = joinSource(content.text)
+  const last = cell.nbformat_outputs[cell.nbformat_outputs.length - 1]
+  if (last?.output_type === "stream" && last.name === stream) {
+    last.text = [joinSource(last.text) + text]
+  } else {
+    cell.nbformat_outputs.push({ output_type: "stream", name: stream, text: [text] })
+  }
 }
 
 export function applyResultMessage(cell: RenderedCell, content: any, msgType: string) {
   const data = content.data ?? {}
 
-  if (data["image/png"]) cell.outputs.push({ kind: "image", data: joinSource(data["image/png"]) })
+  if (data["image/png"])
+    cell.outputs.push({ kind: "image", mime: "image/png", data: joinSource(data["image/png"]) })
+  else if (data["image/jpeg"])
+    cell.outputs.push({ kind: "image", mime: "image/jpeg", data: joinSource(data["image/jpeg"]) })
+  else if (data["image/svg+xml"])
+    cell.outputs.push({
+      kind: "image",
+      mime: "image/svg+xml",
+      data: joinSource(data["image/svg+xml"]),
+    })
   else if (data["text/html"])
     cell.outputs.push({ kind: "html", content: joinSource(data["text/html"]) })
   else if (data["text/latex"])
@@ -52,6 +71,14 @@ export function applyResultMessage(cell: RenderedCell, content: any, msgType: st
 
   if (msgType === "execute_result" && typeof content.execution_count === "number")
     cell.execution_count = content.execution_count
+
+  cell.nbformat_outputs ??= []
+  cell.nbformat_outputs.push({
+    output_type: msgType,
+    data: structuredClone(data),
+    metadata: structuredClone(content.metadata ?? {}),
+    ...(msgType === "execute_result" ? { execution_count: content.execution_count ?? null } : {}),
+  })
 }
 
 export function applyErrorMessage(cell: RenderedCell, content: any) {
@@ -59,10 +86,18 @@ export function applyErrorMessage(cell: RenderedCell, content: any) {
     ? content.traceback.join("\n")
     : `${content.ename}: ${content.evalue}`
   cell.outputs.push({ kind: "error", content: stripAnsi(traceback) })
+  cell.nbformat_outputs ??= []
+  cell.nbformat_outputs.push({
+    output_type: "error",
+    ename: content.ename ?? "Error",
+    evalue: content.evalue ?? "",
+    traceback: Array.isArray(content.traceback) ? structuredClone(content.traceback) : [traceback],
+  })
 }
 
 export function applyClearOutputMessage(cell: RenderedCell) {
   cell.outputs = []
+  cell.nbformat_outputs = []
 }
 
 /**
@@ -76,6 +111,10 @@ export function applyClearOutputMessage(cell: RenderedCell) {
  * user never ran at all.
  */
 function resolveCellIndex(currentCells: RenderedCell[], pending: PendingExec): number | null {
+  if (pending.id) {
+    const idIndex = currentCells.findIndex((cell) => cell.id === pending.id)
+    if (idIndex !== -1) return idIndex
+  }
   if (currentCells[pending.index]?.source === pending.source) return pending.index
 
   const foundIndex = currentCells.findIndex((cell) => cell.source === pending.source)

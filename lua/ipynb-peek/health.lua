@@ -30,7 +30,7 @@ local function check_jupytext_format()
         .. vim.inspect(fmt)
         .. ")",
       {
-        "Set `vim.g.jupytext_fmt = \"py:percent\"` before jupytext.vim loads - "
+        'Set `vim.g.jupytext_fmt = "py:percent"` before jupytext.vim loads - '
           .. "without this, ipynb-peek will silently find zero cells in every notebook",
       }
     )
@@ -70,6 +70,23 @@ local function check_jupyter_kernels()
   local count = ok and decoded.kernelspecs and vim.tbl_count(decoded.kernelspecs) or 0
   if count > 0 then
     health.ok(count .. " Jupyter kernel(s) available")
+    local broken = {}
+    for name, entry in pairs(decoded.kernelspecs) do
+      local argv = entry.spec and entry.spec.argv
+      local executable = argv and argv[1]
+      if not executable or vim.fn.executable(executable) ~= 1 then
+        table.insert(broken, name .. " (" .. tostring(executable or "missing argv") .. ")")
+      end
+    end
+    if #broken > 0 then
+      table.sort(broken)
+      health.warn(
+        "Kernelspec executable(s) not available on Neovim's PATH: " .. table.concat(broken, ", "),
+        {
+          "Activate the intended environment before starting Neovim, or re-register the kernel with its absolute Python path",
+        }
+      )
+    end
   else
     health.warn("jupyter is installed but no kernelspecs were found", {
       "Install ipykernel and register a kernel: python -m ipykernel install --user",

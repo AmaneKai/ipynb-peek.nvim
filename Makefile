@@ -1,6 +1,6 @@
 PLENARY_DIR := .tests/plenary.nvim
 
-.PHONY: test testdeps testlua testserver build checkbuild
+.PHONY: test testdeps testlua testserver teste2e build checkbuild
 
 testdeps:
 	@if [ ! -d $(PLENARY_DIR) ]; then \
@@ -13,6 +13,9 @@ testlua: testdeps
 
 testserver:
 	cd server && npm ci && npm test
+
+teste2e:
+	cd server && npm run test:e2e
 
 test: testlua testserver
 

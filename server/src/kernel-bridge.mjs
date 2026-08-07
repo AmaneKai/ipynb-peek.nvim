@@ -34,7 +34,7 @@ function getFreePort() {
   })
 }
 
-async function findKernelArgv(kernelName) {
+async function findKernelSpec(kernelName) {
   const specs = await new Promise((resolve, reject) => {
     const kernelspecProcess = spawn("jupyter", ["kernelspec", "list", "--json"])
     let out = ""
@@ -50,11 +50,12 @@ async function findKernelArgv(kernelName) {
     })
   })
 
-  const spec = specs[kernelName] || specs["python3"] || Object.values(specs)[0]
-
-  if (!spec) throw new Error("no jupyter kernelspec found (is ipykernel installed?)")
-
-  return spec.spec.argv
+  const entry = specs[kernelName]
+  if (!entry) {
+    const available = Object.keys(specs).sort().join(", ") || "none"
+    throw new Error(`Jupyter kernelspec "${kernelName}" was not found (available: ${available})`)
+  }
+  return entry
 }
 
 const KEY = randomUUID()
@@ -64,6 +65,7 @@ let shell = null
 let iopub = null
 let kernelProcess = null
 let connectionDir = null
+let kernelStderr = ""
 
 /**
  * The connection file holds the HMAC signing key in plaintext - without
@@ -79,31 +81,32 @@ function cleanupConnectionDir() {
   connectionDir = null
 }
 
-function spawnOnce(argv, cwd) {
+function expandKernelEnv(specEnv = {}) {
+  const env = { ...process.env }
+  for (const [name, value] of Object.entries(specEnv)) {
+    env[name] = String(value).replace(/\$\{([^}]+)\}/g, (_, variable) => env[variable] ?? "")
+  }
+  return env
+}
+
+function spawnKernelProcess(argv, cwd, env) {
   return new Promise((resolve, reject) => {
-    const childProcess = spawn(argv[0], argv.slice(1), { stdio: "ignore", cwd })
+    const childProcess = spawn(argv[0], argv.slice(1), {
+      stdio: ["ignore", "ignore", "pipe"],
+      cwd,
+      env,
+    })
+    childProcess.stderr.on("data", (chunk) => {
+      const text = chunk.toString()
+      kernelStderr = (kernelStderr + text).slice(-8000)
+    })
     childProcess.once("spawn", () => resolve(childProcess))
     childProcess.once("error", (error) => reject(error))
   })
 }
 
-/**
- * Some kernelspecs (e.g. a bare pipx-installed "python3" kernel) store a
- * relative "python" in argv, relying on a venv being active on PATH. Falls
- * back to "python3" if that's not resolvable - a common gap on macOS.
- */
-async function spawnKernelProcess(argv, cwd) {
-  try {
-    return await spawnOnce(argv, cwd)
-  } catch (error) {
-    if (error.code === "ENOENT" && argv[0] === "python")
-      return await spawnOnce(["python3", ...argv.slice(1)], cwd)
-
-    throw error
-  }
-}
-
 async function start(kernelName, cwd) {
+  kernelStderr = ""
   const ports = {}
 
   for (const name of ["shell_port", "iopub_port", "stdin_port", "control_port", "hb_port"]) {
@@ -122,13 +125,17 @@ async function start(kernelName, cwd) {
   const connFile = join(connectionDir, "connection.json")
   writeFileSync(connFile, JSON.stringify(connInfo))
 
-  const argvTemplate = await findKernelArgv(kernelName)
-  const argv = argvTemplate.map((entry) => entry.replace("{connection_file}", connFile))
+  const kernelEntry = await findKernelSpec(kernelName)
+  const argv = kernelEntry.spec.argv.map((entry) =>
+    entry
+      .replace("{connection_file}", connFile)
+      .replace("{resource_dir}", kernelEntry.resource_dir),
+  )
 
-  kernelProcess = await spawnKernelProcess(argv, cwd)
+  kernelProcess = await spawnKernelProcess(argv, cwd, expandKernelEnv(kernelEntry.spec.env))
   kernelProcess.on("exit", (code) => {
     cleanupConnectionDir()
-    emit({ type: "kernel_exit", code })
+    emit({ type: "kernel_exit", code, stderr: kernelStderr.trim() })
   })
   kernelProcess.on("error", (error) =>
     emit({ type: "error", message: "kernel process error: " + error.message }),
@@ -271,6 +278,12 @@ rl.on("line", async (line) => {
       process.exit(0)
     }
   } catch (error) {
-    emit({ type: "error", message: String((error && error.stack) || error) })
+    const detail = msg.cmd === "start" && kernelStderr.trim() ? `\n${kernelStderr.trim()}` : ""
+    emit({
+      type: "error",
+      operation: msg.cmd,
+      id: msg.id,
+      message: String((error && error.stack) || error) + detail,
+    })
   }
 })

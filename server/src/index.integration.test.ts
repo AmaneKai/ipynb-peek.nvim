@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeAll, afterAll } from "vitest"
+import http from "node:http"
 import { WebSocket } from "ws"
 import { createServer } from "./index"
 
@@ -33,6 +34,21 @@ describe("GET /health", () => {
   test("responds ok", async () => {
     const response = await fetch(`${baseUrl}/health`)
     expect(await response.text()).toBe("ok")
+  })
+
+  test("rejects a non-loopback Host header to prevent DNS rebinding", async () => {
+    const status = await new Promise<number | undefined>((resolve, reject) => {
+      const request = http.get(
+        `${baseUrl}/health`,
+        { headers: { host: "attacker.example" } },
+        (response) => {
+          response.resume()
+          resolve(response.statusCode)
+        },
+      )
+      request.on("error", reject)
+    })
+    expect(status).toBe(403)
   })
 })
 
@@ -84,6 +100,19 @@ describe("POST /sync", () => {
       body: JSON.stringify({ cells: [{ cell_type: "code", source: "2 + 2" }] }),
     })
     expect(await readOk(response)).toBe(true)
+  })
+})
+
+describe("GET /notebook-asset", () => {
+  test("serves relative notebook assets and rejects directory traversal", async () => {
+    await fetch(`${baseUrl}/render`, {
+      method: "POST",
+      headers: { "x-notebook-dir": process.cwd() },
+      body: JSON.stringify({ metadata: {}, cells: [] }),
+    })
+
+    expect((await fetch(`${baseUrl}/notebook-asset?path=package.json`)).status).toBe(200)
+    expect((await fetch(`${baseUrl}/notebook-asset?path=../package.json`)).status).toBe(403)
   })
 })
 
@@ -149,9 +178,10 @@ describe("POST /restart", () => {
 })
 
 describe("POST /interrupt", () => {
-  test("reports ok even with no kernel running (a no-op write)", async () => {
+  test("reports a useful conflict when no kernel is running", async () => {
     const response = await fetch(`${baseUrl}/interrupt`, { method: "POST" })
-    expect(await readOk(response)).toBe(true)
+    expect(response.status).toBe(409)
+    expect(await readOk(response)).toBe(false)
   })
 })
 
@@ -199,11 +229,34 @@ describe("GET /ws", () => {
   }
 
   test("sends the initial render payload on connect, then broadcasts /cursor updates", async () => {
+    await fetch(`${baseUrl}/render`, {
+      method: "POST",
+      body: JSON.stringify({
+        metadata: {},
+        cells: [
+          {
+            cell_type: "code",
+            source: ["1 + 1"],
+            execution_count: 1,
+            outputs: [
+              {
+                output_type: "execute_result",
+                execution_count: 1,
+                data: { "text/plain": ["2"] },
+                metadata: {},
+              },
+            ],
+          },
+        ],
+      }),
+    })
     const { ws, ready, nextMessage } = connect(wsUrl)
     await ready
 
     const initial = await nextMessage()
     expect(initial.type).toBe("render")
+    expect(initial.cells[0].outputs[0].content).toBe("2")
+    expect(initial.cells[0]).not.toHaveProperty("nbformat_outputs")
 
     const broadcastReceived = nextMessage()
     await fetch(`${baseUrl}/cursor`, {
@@ -246,8 +299,11 @@ describe("auth token", () => {
   })
 
   test("GET / embeds the token for the page's own client.js to use", async () => {
-    const html = await (await fetch(`${tokenBaseUrl}/`)).text()
-    expect(html).toContain(`window.__IPYNB_PEEK_TOKEN__=${JSON.stringify(token)}`)
+    const response = await fetch(`${tokenBaseUrl}/`)
+    const html = await response.text()
+    expect(html).toContain(`<meta name="ipynb-peek-token" content="${token}"`)
+    expect(response.headers.get("content-security-policy")).toContain("script-src 'self'")
+    expect(html).not.toContain("https://")
   })
 
   test("rejects /cursor with no token", async () => {

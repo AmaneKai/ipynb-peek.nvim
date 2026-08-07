@@ -1,10 +1,10 @@
 local M = {}
 
-local uv = vim.loop
 local job_id = nil
 M.port = nil
 M.url = nil
 M.ready = false
+M.error = nil
 --- Per-session shared secret the server requires on every state-changing
 --- request and the /ws upgrade (see server/src/index.ts's isAuthorized) -
 --- without it, any other page open in the user's browser could drive the
@@ -16,19 +16,20 @@ M.token = nil
 --- can tell whether the caller's theme differs from what's live, to warn
 --- about it (see M.start below).
 local active_theme = nil
-
-local function get_free_port()
-  local tcp = uv.new_tcp()
-  tcp:bind("127.0.0.1", 0)
-  local sockname = tcp:getsockname()
-  tcp:close()
-  return sockname.port
-end
+local stopping = false
 
 local function generate_token()
-  math.randomseed(uv.hrtime())
-  local raw = tostring(uv.hrtime()) .. tostring(math.random(1e9)) .. tostring(vim.fn.getpid())
-  return vim.fn.sha256(raw)
+  local result = vim
+    .system({
+      "node",
+      "-e",
+      'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))',
+    }, { text = true })
+    :wait()
+  if result.code ~= 0 or not result.stdout or not result.stdout:match("^[0-9a-f]+$") then
+    return nil, "failed to generate a cryptographically secure session token"
+  end
+  return result.stdout
 end
 
 --- Starts the render server (a prebuilt dist/index.js, committed to the
@@ -52,18 +53,26 @@ function M.start(opts)
     end
     return
   end
-  M.port = get_free_port()
+  M.port = nil
   M.url = nil
   M.ready = false
-  M.token = generate_token()
+  M.error = nil
+  local token, token_error = generate_token()
+  if not token then
+    M.error = token_error
+    return false
+  end
+  M.token = token
   active_theme = opts.theme
 
-  local env = { IPYNB_PEEK_PORT = tostring(M.port), IPYNB_PEEK_TOKEN = M.token }
+  local env = { IPYNB_PEEK_PORT = "0", IPYNB_PEEK_TOKEN = M.token }
   if opts.theme ~= nil then
     env.IPYNB_PEEK_THEME = vim.json.encode(opts.theme)
   end
 
-  job_id = vim.fn.jobstart({ "node", "dist/index.js" }, {
+  stopping = false
+  local started_job_id
+  started_job_id = vim.fn.jobstart({ "node", "dist/index.js" }, {
     cwd = opts.server_dir,
     env = env,
     stdout_buffered = false,
@@ -71,6 +80,7 @@ function M.start(opts)
       for _, line in ipairs(data) do
         if line:match("^IPYNB_PEEK_URL=") then
           M.url = line:match("^IPYNB_PEEK_URL=(.+)$")
+          M.port = tonumber(M.url:match(":(%d+)/?$"))
           M.ready = true
         end
       end
@@ -84,21 +94,45 @@ function M.start(opts)
         end
       end
     end,
-    on_exit = function()
+    on_exit = function(_, exit_code)
+      if job_id ~= started_job_id then
+        return
+      end
+      local was_ready = M.ready
       job_id = nil
       M.ready = false
       M.url = nil
+      if not stopping then
+        M.error = "preview server exited unexpectedly (exit " .. exit_code .. ")"
+        if was_ready then
+          vim.schedule(function()
+            vim.notify("[ipynb-peek] " .. M.error, vim.log.levels.ERROR)
+          end)
+        end
+      end
     end,
   })
+  if started_job_id <= 0 then
+    M.error = "failed to start Node preview server (jobstart returned " .. started_job_id .. ")"
+    M.token = nil
+    return false
+  end
+  job_id = started_job_id
+  return true
 end
 
 function M.stop()
+  stopping = true
   if job_id then
     vim.fn.jobstop(job_id)
     job_id = nil
     M.ready = false
     M.url = nil
   end
+  M.port = nil
+  M.token = nil
+  M.error = nil
+  active_theme = nil
 end
 
 return M

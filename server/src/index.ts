@@ -2,6 +2,7 @@ import http from "node:http"
 import { spawn } from "node:child_process"
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
+import { extname, resolve, sep } from "node:path"
 import readline from "node:readline"
 import { WebSocketServer, WebSocket } from "ws"
 import {
@@ -13,11 +14,10 @@ import {
   type RenderedCell,
 } from "./notebook"
 import { handleIopub, reconcileBusyStatus, type PendingExec } from "./iopub"
-import { writeNotebookFile } from "./persist"
+import { updateNotebookFile } from "./persist"
 import { buildThemeCss } from "./themes"
 
 let currentCells: RenderedCell[] = []
-let currentNotebookJson: any = null
 let notebookKernelName: string | undefined
 let notebookDir: string | undefined
 let notebookPath: string | undefined
@@ -45,6 +45,17 @@ let wsClients = new Set<WebSocket>()
  */
 let authToken: string | undefined
 
+function hasLoopbackHost(req: http.IncomingMessage): boolean {
+  const host = req.headers.host
+  if (!host) return false
+  try {
+    const hostname = new URL(`http://${host}`).hostname
+    return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]"
+  } catch {
+    return false
+  }
+}
+
 function isAuthorized(req: http.IncomingMessage, url: URL): boolean {
   if (!authToken) return true
   const header = req.headers["x-ipynb-peek-token"]
@@ -52,8 +63,14 @@ function isAuthorized(req: http.IncomingMessage, url: URL): boolean {
   return url.searchParams.get("token") === authToken
 }
 
+/** Keep the exact nbformat copy used for persistence on the server. */
+function publicCell(cell: RenderedCell): Omit<RenderedCell, "nbformat_outputs"> {
+  const { nbformat_outputs: _nbformatOutputs, ...visibleCell } = cell
+  return visibleCell
+}
+
 function renderPayload(): string {
-  return JSON.stringify({ type: "render", cells: currentCells })
+  return JSON.stringify({ type: "render", cells: currentCells.map(publicCell) })
 }
 
 function broadcast(payload: string) {
@@ -81,8 +98,21 @@ function broadcastFull() {
  * moment a cell goes busy, streams output, errors, or finishes.
  */
 function broadcastCell(index: number) {
-  broadcast(JSON.stringify({ type: "cell_update", index, cell: currentCells[index] }))
+  broadcast(JSON.stringify({ type: "cell_update", index, cell: publicCell(currentCells[index]) }))
   emitEvent({ type: "cell_status", ...cellStatusInfo(currentCells[index], index) })
+}
+
+function broadcastSync(previousCells: RenderedCell[]) {
+  if (previousCells.length !== currentCells.length) {
+    broadcastFull()
+    return
+  }
+  for (let index = 0; index < currentCells.length; index++) {
+    const previous = previousCells[index]
+    const current = currentCells[index]
+    if (previous.source !== current.source || previous.cell_type !== current.cell_type)
+      broadcastCell(index)
+  }
 }
 
 /**
@@ -98,11 +128,14 @@ function broadcastCell(index: number) {
  * live preview.
  */
 async function persistOutputsToDisk() {
-  if (!notebookPath || !currentNotebookJson) return
+  if (!notebookPath) return
 
   try {
-    patchNotebookOutputs(currentNotebookJson, currentCells)
-    await writeNotebookFile(notebookPath, currentNotebookJson)
+    const path = notebookPath
+    const cellsSnapshot = structuredClone(currentCells)
+    await updateNotebookFile(path, (notebookJson) => {
+      patchNotebookOutputs(notebookJson, cellsSnapshot)
+    })
   } catch (error) {
     console.error("[ipynb-peek] failed to persist outputs to disk:", error)
   }
@@ -126,6 +159,7 @@ function emitEvent(event: any) {
 let bridgeProc: ReturnType<typeof spawn> | null = null
 let kernelReadyPromise: Promise<void> | null = null
 let kernelReadyResolve: (() => void) | null = null
+let kernelReadyReject: ((error: Error) => void) | null = null
 const pendingExecs = new Map<string, PendingExec>()
 
 /**
@@ -142,19 +176,72 @@ function readLines(stream: NodeJS.ReadableStream, onLine: (line: string) => void
 }
 
 function writeToBridge(obj: any) {
-  bridgeProc?.stdin?.write(JSON.stringify(obj) + "\n")
+  if (!bridgeProc?.stdin?.writable) throw new Error("kernel bridge is not available")
+  bridgeProc.stdin.write(JSON.stringify(obj) + "\n")
+}
+
+function appendExecutionFailure(cell: RenderedCell, message: string) {
+  cell.outputs.push({ kind: "error", content: message })
+  cell.nbformat_outputs ??= []
+  cell.nbformat_outputs.push({
+    output_type: "error",
+    ename: "KernelError",
+    evalue: message,
+    traceback: [message],
+  })
+}
+
+function pendingCellIndex(pending: PendingExec): number | null {
+  if (pending.id) {
+    const idIndex = currentCells.findIndex((cell) => cell.id === pending.id)
+    if (idIndex !== -1) return idIndex
+  }
+  if (currentCells[pending.index]?.source === pending.source) return pending.index
+  const sourceIndex = currentCells.findIndex((cell) => cell.source === pending.source)
+  return sourceIndex === -1 ? null : sourceIndex
+}
+
+function failPendingExecutions(message: string) {
+  const updated = new Set<number>()
+
+  for (const pending of pendingExecs.values()) {
+    const index = pendingCellIndex(pending)
+    if (index === null || updated.has(index)) continue
+    const cell = currentCells[index]
+    appendExecutionFailure(cell, message)
+    cell.status = "idle"
+    cell.duration_ms = cell.started_at ? Date.now() - cell.started_at : undefined
+    updated.add(index)
+  }
+  pendingExecs.clear()
+  for (const index of updated) broadcastCell(index)
+}
+
+function failBridge(proc: ReturnType<typeof spawn>, message: string) {
+  if (bridgeProc !== proc) return
+  kernelReadyReject?.(new Error(message))
+  kernelReadyResolve = null
+  kernelReadyReject = null
+  bridgeProc = null
+  kernelReadyPromise = null
+  try {
+    proc.kill()
+  } catch {}
+  failPendingExecutions(message)
 }
 
 function startBridge(kernelName: string) {
   if (bridgeProc) return
-  kernelReadyPromise = new Promise((resolve) => {
+  kernelReadyPromise = new Promise((resolve, reject) => {
     kernelReadyResolve = resolve
+    kernelReadyReject = reject
   })
 
   const bridgePath = fileURLToPath(new URL("./kernel-bridge.mjs", import.meta.url))
-  bridgeProc = spawn("node", [bridgePath])
+  const proc = spawn("node", [bridgePath])
+  bridgeProc = proc
 
-  readLines(bridgeProc.stdout!, (line) => {
+  readLines(proc.stdout!, (line) => {
     let bridgeMessage: any
 
     try {
@@ -164,8 +251,11 @@ function startBridge(kernelName: string) {
       return
     }
 
-    if (bridgeMessage.type === "ready") kernelReadyResolve?.()
-    else if (bridgeMessage.type === "iopub")
+    if (bridgeMessage.type === "ready") {
+      kernelReadyResolve?.()
+      kernelReadyResolve = null
+      kernelReadyReject = null
+    } else if (bridgeMessage.type === "iopub")
       handleIopub(
         bridgeMessage.parent_id,
         bridgeMessage.msg_type,
@@ -177,36 +267,59 @@ function startBridge(kernelName: string) {
           if (currentCells[index]?.status === "idle") void persistOutputsToDisk()
         },
       )
-    else if (bridgeMessage.type === "error") console.error("[kernel-bridge]", bridgeMessage.message)
-    else if (bridgeMessage.type === "kernel_exit")
-      console.error("[kernel-bridge] kernel process exited with code", bridgeMessage.code)
+    else if (bridgeMessage.type === "error") {
+      const message = String(bridgeMessage.message ?? "kernel bridge error")
+      if (bridgeMessage.operation === "start") failBridge(proc, message)
+      else if (bridgeMessage.operation === "execute" && bridgeMessage.id) {
+        const pending = pendingExecs.get(bridgeMessage.id)
+        if (pending) {
+          const index = pendingCellIndex(pending)
+          pendingExecs.delete(bridgeMessage.id)
+          if (index !== null) {
+            const cell = currentCells[index]
+            appendExecutionFailure(cell, message)
+            cell.status = "idle"
+            cell.duration_ms = cell.started_at ? Date.now() - cell.started_at : undefined
+            broadcastCell(index)
+          }
+        }
+      } else console.error("[kernel-bridge]", message)
+    } else if (bridgeMessage.type === "kernel_exit") {
+      const detail = bridgeMessage.stderr ? `: ${bridgeMessage.stderr}` : ""
+      failBridge(proc, `kernel process exited with code ${bridgeMessage.code}${detail}`)
+    }
   })
-  bridgeProc.stdout!.on("error", (error) =>
-    console.error("[kernel-bridge] stdout reader failed:", error),
-  )
+  proc.stdout!.on("error", (error) => failBridge(proc, `kernel bridge stdout failed: ${error}`))
 
-  readLines(bridgeProc.stderr!, (line) => {
+  readLines(proc.stderr!, (line) => {
     console.error("[kernel-bridge stderr]", line)
   })
-  bridgeProc.stderr!.on("error", () => {})
+  proc.stderr!.on("error", () => {})
+  proc.on("error", (error) => failBridge(proc, `failed to start kernel bridge: ${error.message}`))
+  proc.on("exit", (code, signal) => {
+    failBridge(proc, `kernel bridge exited (${signal ?? code ?? "unknown"})`)
+  })
 
   writeToBridge({ cmd: "start", kernel_name: kernelName, cwd: notebookDir })
 }
 
 async function ensureKernelStarted(kernelName: string) {
   if (!bridgeProc) startBridge(kernelName)
-
-  await kernelReadyPromise
+  const ready = kernelReadyPromise
+  if (!ready) throw new Error("kernel bridge failed to initialize")
+  await ready
 }
 
 function cleanupBridge() {
-  try {
-    bridgeProc?.kill()
-  } catch {}
-
+  const proc = bridgeProc
+  kernelReadyReject?.(new Error("kernel stopped"))
+  kernelReadyResolve = null
+  kernelReadyReject = null
   bridgeProc = null
   kernelReadyPromise = null
-  kernelReadyResolve = null
+  try {
+    proc?.kill()
+  } catch {}
   pendingExecs.clear()
 }
 process.on("exit", cleanupBridge)
@@ -265,30 +378,58 @@ function serveAsset(res: http.ServerResponse, filename: string, contentType: str
 const themeCss = buildThemeCss(process.env.IPYNB_PEEK_THEME)
 
 /**
- * Injects the theme's `:root { --ipynb-x: ... }` block, and the auth token
- * the page's own client.js needs to open its /ws connection, into
- * index.html before serving it. Safe to embed unauthenticated: a
+ * Injects the auth token the page's own client.js needs to open its /ws
+ * connection into a meta element in index.html before serving it. Safe to
+ * embed unauthenticated: a
  * cross-origin page can navigate/iframe this URL but can't read the
  * response body or reach into the iframe's DOM (Same-Origin Policy), so
  * the token never leaves this page's own JS context.
  */
 function serveIndexHtml(res: http.ServerResponse) {
   const html = readFileSync(new URL("./index.html", import.meta.url), "utf8")
-  const injected = html.replace(
-    "</head>",
-    `<style>${themeCss}</style>\n` +
-      `<script>window.__IPYNB_PEEK_TOKEN__=${JSON.stringify(authToken ?? "")}</script>\n</head>`,
-  )
-  res.writeHead(200, { "content-type": "text/html; charset=utf-8" })
+  const injected = html.replace("__IPYNB_PEEK_TOKEN__", authToken ?? "")
+  res.writeHead(200, {
+    "content-type": "text/html; charset=utf-8",
+    "content-security-policy": [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: blob:",
+      "font-src 'self'",
+      "connect-src 'self' ws://127.0.0.1:*",
+      "object-src 'none'",
+      "base-uri 'none'",
+      "form-action 'none'",
+      "frame-ancestors 'none'",
+    ].join("; "),
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+  })
   res.end(injected)
 }
 
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse) {
   const url = new URL(req.url ?? "/", "http://localhost")
 
+  // A localhost bind alone is vulnerable to DNS rebinding: an attacker-owned
+  // hostname can resolve to 127.0.0.1 and read the token-bearing root page as
+  // its own origin. Reject non-loopback Host headers before serving anything.
+  if (!hasLoopbackHost(req)) return sendJson(res, 403, { ok: false, error: "invalid host header" })
+
   if (url.pathname === "/") return serveIndexHtml(res)
 
   if (url.pathname === "/style.css") return serveAsset(res, "style.css", "text/css; charset=utf-8")
+
+  if (url.pathname === "/theme.css") {
+    res.writeHead(200, { "content-type": "text/css; charset=utf-8" })
+    return res.end(themeCss)
+  }
+
+  if (url.pathname === "/katex.min.css")
+    return serveAsset(res, "katex.min.css", "text/css; charset=utf-8")
+
+  if (url.pathname.startsWith("/fonts/") && /^[a-zA-Z0-9_.-]+\.woff2$/.test(url.pathname.slice(7)))
+    return serveAsset(res, url.pathname.slice(1), "font/woff2")
 
   if (url.pathname === "/client.js")
     return serveAsset(res, "client.js", "text/javascript; charset=utf-8")
@@ -305,6 +446,32 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
    */
   if (!isAuthorized(req, url)) return sendJson(res, 401, { ok: false, error: "unauthorized" })
 
+  if (url.pathname === "/notebook-asset" && req.method === "GET") {
+    const requested = url.searchParams.get("path")
+    if (!notebookDir || !requested)
+      return sendJson(res, 404, { ok: false, error: "notebook asset not found" })
+    const root = resolve(notebookDir)
+    const assetPath = resolve(root, requested)
+    if (assetPath !== root && !assetPath.startsWith(root + sep))
+      return sendJson(res, 403, { ok: false, error: "asset path leaves notebook directory" })
+    const contentTypes: Record<string, string> = {
+      ".png": "image/png",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".gif": "image/gif",
+      ".webp": "image/webp",
+      ".svg": "image/svg+xml",
+    }
+    try {
+      const contentType =
+        contentTypes[extname(assetPath).toLowerCase()] ?? "application/octet-stream"
+      res.writeHead(200, { "content-type": contentType, "x-content-type-options": "nosniff" })
+      return res.end(readFileSync(assetPath))
+    } catch {
+      return sendJson(res, 404, { ok: false, error: "notebook asset not found" })
+    }
+  }
+
   if (url.pathname === "/render" && req.method === "POST") {
     return handleJsonRoute(res, async () => {
       const dirHeader = req.headers["x-notebook-dir"]
@@ -314,19 +481,20 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       const raw = await readBody(req)
       const nb = JSON.parse(raw)
       notebookKernelName = nb.metadata?.kernelspec?.name ?? notebookKernelName
-      currentNotebookJson = nb
       currentCells = mergeCells(currentCells, renderNotebook(nb))
       reconcileBusyStatus(currentCells, pendingExecs)
       broadcastFull()
+      await persistOutputsToDisk()
     })
   }
 
   if (url.pathname === "/sync" && req.method === "POST") {
     return handleJsonRoute(res, async () => {
       const body: any = JSON.parse(await readBody(req))
+      const previousCells = currentCells
       currentCells = syncCells(currentCells, body.cells ?? [])
       reconcileBusyStatus(currentCells, pendingExecs)
-      broadcastFull()
+      broadcastSync(previousCells)
     })
   }
 
@@ -336,20 +504,39 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       const index = body.index
       const code = body.code ?? ""
 
-      if (typeof index !== "number" || !currentCells[index])
+      if (
+        typeof index !== "number" ||
+        typeof code !== "string" ||
+        currentCells[index]?.cell_type !== "code"
+      )
         return { status: 400, body: { ok: false, error: "invalid cell index" } }
 
       await ensureKernelStarted(notebookKernelName || "python3")
 
       const msgId = crypto.randomUUID()
-      pendingExecs.set(msgId, { index, source: currentCells[index].source })
+      // The execution request is the newest authoritative version of this
+      // cell. A separately debounced /sync may still be in flight, so using
+      // the server's older source here can make output impossible to resolve
+      // as soon as that /sync lands while the cell is running.
+      currentCells[index].source = code
+      pendingExecs.set(msgId, { index, id: currentCells[index].id, source: code })
       currentCells[index].outputs = []
+      currentCells[index].nbformat_outputs = []
       currentCells[index].status = "busy"
       currentCells[index].started_at = Date.now()
       currentCells[index].duration_ms = undefined
       broadcastCell(index)
 
-      writeToBridge({ cmd: "execute", id: msgId, code })
+      try {
+        writeToBridge({ cmd: "execute", id: msgId, code })
+      } catch (error) {
+        pendingExecs.delete(msgId)
+        const message = String(error instanceof Error ? error.message : error)
+        appendExecutionFailure(currentCells[index], message)
+        currentCells[index].status = "idle"
+        broadcastCell(index)
+        throw error
+      }
     })
   }
 
@@ -365,6 +552,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   }
 
   if (url.pathname === "/interrupt" && req.method === "POST") {
+    if (!bridgeProc)
+      return sendJson(res, 409, { ok: false, error: "no running kernel to interrupt" })
     return handleJsonRoute(res, async () => {
       writeToBridge({ cmd: "interrupt" })
     })
@@ -434,21 +623,26 @@ export function createServer(
     ws.on("message", (data) => {
       try {
         const parsedMessage = JSON.parse(data.toString())
-        if (parsedMessage.type === "insert_cell") {
+        if (
+          parsedMessage.type === "insert_cell" &&
+          Number.isInteger(parsedMessage.after_index) &&
+          parsedMessage.after_index >= -1 &&
+          (parsedMessage.cell_type === "code" || parsedMessage.cell_type === "markdown")
+        ) {
           emitEvent({
             type: "insert_cell",
             after_index: parsedMessage.after_index,
             cell_type: parsedMessage.cell_type,
           })
-        } else if (parsedMessage.type === "delete_cell") {
+        } else if (
+          parsedMessage.type === "delete_cell" &&
+          Number.isInteger(parsedMessage.index) &&
+          parsedMessage.index >= 0
+        ) {
           emitEvent({ type: "delete_cell", index: parsedMessage.index })
         }
       } catch (error) {
-        console.error(
-          "[ipynb-peek] received malformed websocket message from client:",
-          data,
-          error,
-        )
+        console.error("[ipynb-peek] received malformed websocket message from client:", data, error)
       }
     })
 
@@ -457,7 +651,7 @@ export function createServer(
 
   httpServer.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url ?? "/", "http://localhost")
-    if (url.pathname !== "/ws" || !isAuthorized(req, url)) {
+    if (!hasLoopbackHost(req) || url.pathname !== "/ws" || !isAuthorized(req, url)) {
       socket.destroy()
       return
     }
@@ -466,14 +660,17 @@ export function createServer(
     })
   })
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    httpServer.once("error", reject)
     httpServer.listen(port, "127.0.0.1", () => {
+      httpServer.removeListener("error", reject)
       const address = httpServer.address()
       const actualPort = typeof address === "object" && address ? address.port : port
 
       resolve({
         port: actualPort,
         stop(force = false) {
+          cleanupBridge()
           if (force) {
             for (const ws of wsClients) ws.terminate()
             httpServer.closeAllConnections()

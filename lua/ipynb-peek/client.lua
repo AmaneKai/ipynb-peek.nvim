@@ -1,5 +1,5 @@
 local M = {}
-local uv = vim.loop
+local uv = vim.uv or vim.loop
 local server = require("ipynb-peek.server")
 
 local timers = {}
@@ -13,7 +13,16 @@ local timers = {}
 --- remember to attach it themselves.
 function M.request(port, path, body, headers, on_result)
   local url = string.format("http://127.0.0.1:%d%s", port, path)
-  local args = { "curl", "-s", "-X", "POST" }
+  local args = {
+    "curl",
+    "-sS",
+    "--connect-timeout",
+    "2",
+    "--max-time",
+    "45",
+    "-X",
+    "POST",
+  }
   if server.token then
     table.insert(args, "-H")
     table.insert(args, "X-Ipynb-Peek-Token: " .. server.token)
@@ -25,40 +34,36 @@ function M.request(port, path, body, headers, on_result)
   table.insert(args, "--data-binary")
   table.insert(args, "@-")
   table.insert(args, url)
-  vim.system(
-    args,
-    { stdin = body },
-    function(result)
-      if result.code ~= 0 then
-        vim.schedule(function()
-          vim.notify(
-            "[ipynb-peek] request to "
-              .. path
-              .. " failed (curl exit "
-              .. result.code
-              .. ") - is the server still running?",
-            vim.log.levels.WARN
-          )
-        end)
-        return
-      end
-      if not result.stdout or result.stdout == "" then
-        return
-      end
-      local ok, decoded = pcall(vim.json.decode, result.stdout)
-      if ok and decoded then
-        vim.schedule(function()
-          if on_result then
-            on_result(decoded)
-          end
-        end)
-      else
-        vim.schedule(function()
-          vim.notify("[ipynb-peek] got an unparseable response from " .. path, vim.log.levels.WARN)
-        end)
-      end
+  vim.system(args, { stdin = body }, function(result)
+    if result.code ~= 0 then
+      vim.schedule(function()
+        vim.notify(
+          "[ipynb-peek] request to "
+            .. path
+            .. " failed (curl exit "
+            .. result.code
+            .. ") - is the server still running?",
+          vim.log.levels.WARN
+        )
+      end)
+      return
     end
-  )
+    if not result.stdout or result.stdout == "" then
+      return
+    end
+    local ok, decoded = pcall(vim.json.decode, result.stdout)
+    if ok and decoded then
+      vim.schedule(function()
+        if on_result then
+          on_result(decoded)
+        end
+      end)
+    else
+      vim.schedule(function()
+        vim.notify("[ipynb-peek] got an unparseable response from " .. path, vim.log.levels.WARN)
+      end)
+    end
+  end)
 end
 
 --- Debounces requests so rapid-fire triggers (fast saves, fast cursor
@@ -79,6 +84,16 @@ function M.debounced_request(key, port, path, body, headers, delay, on_result)
     timers[key] = nil
     M.request(port, path, body, headers, on_result)
   end)
+end
+
+--- Cancels requests that are still waiting in their debounce window. Used
+--- when a preview closes so an old buffer cannot POST into a later session.
+function M.cancel_debounced()
+  for key, timer in pairs(timers) do
+    timer:stop()
+    timer:close()
+    timers[key] = nil
+  end
 end
 
 return M

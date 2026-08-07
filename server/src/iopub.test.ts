@@ -101,7 +101,7 @@ describe("applyResultMessage", () => {
       { data: { "image/png": "data", "text/plain": "42" } },
       "execute_result",
     )
-    expect(cell.outputs).toEqual([{ kind: "image", data: "data" }])
+    expect(cell.outputs).toEqual([{ kind: "image", mime: "image/png", data: "data" }])
   })
 
   test("renders text/latex as a latex output", () => {
@@ -124,6 +124,28 @@ describe("applyResultMessage", () => {
     const displayDataCell = makeCell()
     applyResultMessage(displayDataCell, { data: {}, execution_count: 7 }, "display_data")
     expect(displayDataCell.execution_count).toBeUndefined()
+  })
+
+  test("retains the complete MIME bundle and metadata for persistence", () => {
+    const cell = makeCell()
+    applyResultMessage(
+      cell,
+      {
+        data: { "text/html": "<b>42</b>", "text/plain": "42" },
+        metadata: { isolated: true },
+        execution_count: 3,
+      },
+      "execute_result",
+    )
+
+    expect(cell.nbformat_outputs).toEqual([
+      {
+        output_type: "execute_result",
+        execution_count: 3,
+        data: { "text/html": "<b>42</b>", "text/plain": "42" },
+        metadata: { isolated: true },
+      },
+    ])
   })
 })
 
