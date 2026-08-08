@@ -107,6 +107,40 @@ local function check_browser()
   end
 end
 
+--- Popup auto-close on mac uses AppleScript to close the browser window
+--- (see browser.lua's close_mac), which macOS gates behind Automation/
+--- AppleEvents permission for whatever terminal/GUI app runs Neovim -
+--- checked here proactively (rather than only discovered the first time
+--- :IpynbPeekClose/quit silently fails to close anything) by running the
+--- exact same kind of AppleScript call against the browser ipynb-peek would
+--- actually use. Deliberately doesn't name which terminal/app needs the
+--- permission - not knowable from here, and not needed: System Settings'
+--- own Automation page already groups it by whichever app is asking.
+local function check_mac_automation_permission()
+  if vim.fn.has("mac") ~= 1 then
+    return
+  end
+  local browser = require("ipynb-peek.browser").find()
+  if not browser then
+    return -- already reported by check_browser() above
+  end
+  local out =
+    vim.fn.system({ "osascript", "-e", string.format('tell application "%s" to count windows', browser.name) })
+  if vim.v.shell_error == 0 then
+    health.ok("Automation access to " .. browser.name .. " is granted (popup auto-close will work)")
+  elseif out:find("-1743") then
+    health.warn("macOS has not granted Automation access to " .. browser.name, {
+      "The preview popup won't auto-close when you quit Neovim or run :IpynbPeekClose until this is granted.",
+      "Grant it in System Settings > Privacy & Security > Automation - find whatever terminal/app "
+        .. "you run Neovim from in that list, and enable "
+        .. browser.name
+        .. " under it.",
+    })
+  else
+    health.warn("could not verify Automation access to " .. browser.name, { vim.trim(out) })
+  end
+end
+
 local function check_linux_popup_close_tools()
   if vim.fn.has("linux") ~= 1 then
     return
@@ -142,6 +176,7 @@ function M.check()
   check_external_binaries()
   check_jupyter_kernels()
   check_browser()
+  check_mac_automation_permission()
   check_linux_popup_close_tools()
   check_build_step()
 end

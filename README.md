@@ -338,7 +338,7 @@ A Node server handles the HTTP/WebSocket connection to the preview page. Actuall
 
 **`:IpynbPeekInterruptKernel` says interrupt isn't supported.** Windows has no real POSIX signals - sending one would silently kill the kernel process rather than interrupt it, leaving the plugin unable to recover without a manual restart. Rather than risk that, it refuses on Windows and tells you to use `:IpynbPeekRestartKernel` instead (loses kernel state, unlike a real interrupt). Interrupt works normally on macOS/Linux.
 
-**The preview popup doesn't close when I close the notebook.** This is a best-effort feature and its reliability varies by platform - macOS needs Automation permission granted to your terminal/Neovim; Linux needs `xdotool` or `wmctrl` installed; Windows support is newer and less tested. Run `:checkhealth ipynb-peek` to see what's missing. The server itself always stops correctly regardless.
+**The preview popup doesn't close when I close the notebook.** This is a best-effort feature and its reliability varies by platform - macOS needs Automation permission granted to your terminal/Neovim (`:checkhealth ipynb-peek` checks this directly and tells you which browser needs it enabled); Linux needs `xdotool` or `wmctrl` installed; Windows support is newer and less tested. The server itself always stops correctly regardless.
 
 **Something's not working and I don't know why.** Run `:checkhealth ipynb-peek` first - this plugin has a larger-than-usual set of external dependencies (jupytext.vim, node, jupyter/ipykernel, a browser, curl), and the health check is the fastest way to find out which one is the problem.
 
