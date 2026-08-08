@@ -185,6 +185,17 @@ describe("POST /interrupt", () => {
   })
 })
 
+describe("POST /input", () => {
+  test("reports a useful conflict when no kernel is running", async () => {
+    const response = await fetch(`${baseUrl}/input`, {
+      method: "POST",
+      body: JSON.stringify({ value: "hi" }),
+    })
+    expect(response.status).toBe(409)
+    expect(await readOk(response)).toBe(false)
+  })
+})
+
 describe("POST /cursor", () => {
   test("accepts a cursor update and reports ok", async () => {
     const response = await fetch(`${baseUrl}/cursor`, {
