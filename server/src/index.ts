@@ -163,6 +163,20 @@ let kernelReadyReject: ((error: Error) => void) | null = null
 const pendingExecs = new Map<string, PendingExec>()
 
 /**
+ * The kernel's outstanding input_request, if any - kept server-side (not
+ * just fired once over the websocket) so a browser that reconnects (popup
+ * closed and reopened, network blip) while a cell is blocked on input()
+ * still sees the prompt instead of a cell that looks permanently busy with
+ * no way to unblock it short of an interrupt. Cleared once answered or once
+ * the kernel that owned it goes away (see cleanupBridge).
+ */
+let pendingInputRequest: { index: number | null; prompt: string; password: boolean } | null = null
+
+function inputRequestPayload(): string {
+  return JSON.stringify({ type: "input_request", ...pendingInputRequest })
+}
+
+/**
  * Node child-process stdout/stderr are the same kind of stream
  * kernel-bridge.mjs's own stdin already is - readline is the exact pattern
  * that file already uses for itself, reused here rather than hand-rolling a
@@ -270,14 +284,12 @@ function startBridge(kernelName: string) {
     else if (bridgeMessage.type === "input_request") {
       const pending = pendingExecs.get(bridgeMessage.parent_id)
       const index = pending ? pendingCellIndex(pending) : null
-      broadcast(
-        JSON.stringify({
-          type: "input_request",
-          index,
-          prompt: String(bridgeMessage.prompt ?? ""),
-          password: bridgeMessage.password === true,
-        }),
-      )
+      pendingInputRequest = {
+        index,
+        prompt: String(bridgeMessage.prompt ?? ""),
+        password: bridgeMessage.password === true,
+      }
+      broadcast(inputRequestPayload())
     } else if (bridgeMessage.type === "error") {
       const message = String(bridgeMessage.message ?? "kernel bridge error")
       if (bridgeMessage.operation === "start") failBridge(proc, message)
@@ -332,6 +344,7 @@ function cleanupBridge() {
     proc?.kill()
   } catch {}
   pendingExecs.clear()
+  pendingInputRequest = null
 }
 process.on("exit", cleanupBridge)
 process.on("SIGINT", () => {
@@ -534,12 +547,20 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       currentCells[index].outputs = []
       currentCells[index].nbformat_outputs = []
       currentCells[index].status = "busy"
-      currentCells[index].started_at = Date.now()
+      // Not started_at: this only marks the request as submitted/queued.
+      // applyStatusMessage stamps started_at once the kernel's own iopub
+      // "busy" for this msg_id actually arrives, which is what keeps the
+      // reported duration from including time spent queued behind another
+      // still-running cell.
+      currentCells[index].started_at = undefined
       currentCells[index].duration_ms = undefined
       broadcastCell(index)
 
       try {
-        writeToBridge({ cmd: "execute", id: msgId, code })
+        // Only offer stdin when a browser is actually connected to answer
+        // it - otherwise a blocked input()/getpass() would hang the kernel
+        // waiting on an input_reply nothing could ever send.
+        writeToBridge({ cmd: "execute", id: msgId, code, allow_stdin: wsClients.size > 0 })
       } catch (error) {
         pendingExecs.delete(msgId)
         const message = String(error instanceof Error ? error.message : error)
@@ -567,6 +588,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     return handleJsonRoute(res, async () => {
       const body: any = JSON.parse(await readBody(req))
       writeToBridge({ cmd: "input_reply", value: String(body.value ?? "") })
+      pendingInputRequest = null
     })
   }
 
@@ -638,6 +660,10 @@ export function createServer(
   wss.on("connection", (ws: WebSocket) => {
     wsClients.add(ws)
     ws.send(renderPayload())
+    // A cell blocked on input() before this client connected (or while a
+    // previous one was disconnected) would otherwise look like it's just
+    // stuck busy forever, with no visible prompt to unblock it.
+    if (pendingInputRequest) ws.send(inputRequestPayload())
 
     ws.on("message", (data) => {
       try {
