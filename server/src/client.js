@@ -75,6 +75,15 @@ hljs.registerLanguage("python", python)
     }).catch((error) => console.error("[ipynb-peek] failed to send stdin reply:", error))
   }
 
+  /** Sends SIGINT to the running kernel - the only way to stop a busy cell from the preview itself. */
+  function sendInterrupt() {
+    fetch("/interrupt", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-ipynb-peek-token": sessionToken },
+      body: "{}",
+    }).catch((error) => console.error("[ipynb-peek] failed to send interrupt:", error))
+  }
+
   stdinSend.addEventListener("click", submitStdinReply)
   stdinInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") submitStdinReply()
@@ -252,6 +261,15 @@ hljs.registerLanguage("python", python)
         const timing = document.createElement("span")
         timing.className = "timing"
         statusBar.appendChild(timing)
+
+        if (cell.status === "busy") {
+          const interruptBtn = document.createElement("button")
+          interruptBtn.className = "interrupt-btn"
+          interruptBtn.textContent = "■"
+          interruptBtn.title = "Interrupt kernel"
+          interruptBtn.addEventListener("click", sendInterrupt)
+          statusBar.appendChild(interruptBtn)
+        }
 
         function tick() {
           if (cell.status !== "busy") {
