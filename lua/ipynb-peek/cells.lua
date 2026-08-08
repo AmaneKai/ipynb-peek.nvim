@@ -76,9 +76,42 @@ function M.cell_before(parsed, index)
   return parsed[index]
 end
 
+--- Jupytext comments out IPython line magics (`%foo`) and shell/help
+--- escapes (`!foo`, `?foo`) with a leading `# ` when it converts a notebook
+--- into this `# %%` script view, so the resulting file stays parseable as
+--- plain Python (see jupytext's magics.py `_MAGIC_RE`/
+--- `_PYTHON_HELP_OR_BASH_CMD`) - it un-escapes them again on its own when
+--- writing the buffer back to .ipynb JSON on save. Live execution/sync
+--- reads this buffer directly, before any save happens, so without undoing
+--- that same escaping here a `%time` or `!command` line would run as a
+--- no-op comment instead of what it says. Deliberately does not match `%%`
+--- (double-percent): jupytext represents an IPython *cell* magic like
+--- `%%bash` completely differently - as a `# %% language="bash"` marker
+--- with its whole body commented, not an inline-commented `%%bash` line
+--- (which would collide with jupytext's own `# %%` cell-boundary syntax) -
+--- reconstructing that is a separate, bigger feature. Also doesn't attempt
+--- jupytext's no-prefix bash-command heuristic (`cd`, `ls`, ...) or
+--- multi-line continuations, both rare enough not to be worth the extra
+--- risk of false positives here.
+local function uncomment_magic_line(line)
+  local indent, rest = line:match("^(%s*)#%s?(.*)$")
+  if not indent then
+    return line
+  end
+  if rest:match("^%%%a") or rest:match("^[!?][%a.~$\\/{}]") then
+    return indent .. rest
+  end
+  return line
+end
+
 --- Extracts a cell's body source, excluding the `# %%` marker line itself.
 function M.source(bufnr, cell)
   local lines = vim.api.nvim_buf_get_lines(bufnr, cell.start_line, cell.end_line, false)
+  if cell.cell_type == "code" then
+    for line_number, line in ipairs(lines) do
+      lines[line_number] = uncomment_magic_line(line)
+    end
+  end
   return table.concat(lines, "\n")
 end
 
