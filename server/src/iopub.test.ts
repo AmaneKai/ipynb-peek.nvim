@@ -37,6 +37,18 @@ describe("applyStatusMessage", () => {
     expect(pendingExecs.has("parent-1")).toBe(true)
   })
 
+  test("stamps started_at when busy arrives, overriding an earlier queued-time value - so a cell queued behind a long-running one doesn't count that wait as its own duration", () => {
+    const queuedAt = Date.now() - 30000
+    const cell = makeCell({ started_at: queuedAt })
+    const pendingExecs = pendingMap([["parent-1", { index: 0, source: cell.source }]])
+
+    applyStatusMessage(cell, { execution_state: "busy" }, "parent-1", pendingExecs)
+    expect(cell.started_at).toBeGreaterThan(queuedAt)
+
+    applyStatusMessage(cell, { execution_state: "idle" }, "parent-1", pendingExecs)
+    expect(cell.duration_ms).toBeLessThan(1000)
+  })
+
   test("marks idle, records duration, and clears the pending entry", () => {
     const cell = makeCell({ status: "busy", started_at: Date.now() - 50 })
     const pendingExecs = pendingMap([["parent-1", { index: 0, source: cell.source }]])
