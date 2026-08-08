@@ -182,14 +182,23 @@ async function start(kernelName, cwd) {
     emit({ type: "error", message: "kernel process error: " + error.message }),
   )
 
-  shell = new Dealer()
+  // ipykernel routes an input_request back on the stdin ROUTER socket using
+  // the ZMQ routing identity it saw on the shell channel for that
+  // execute_request - real Jupyter frontends (see jupyter_client's
+  // `connect_shell`/`connect_stdin`, both called with `identity=
+  // self.session.bsession`) set shell and stdin to the SAME explicit
+  // routing identity for exactly this reason. Without it, zeromq.js
+  // auto-generates a different (or no) identity per socket, the kernel has
+  // no route back to us, and input_request is silently never delivered -
+  // the kernel just blocks forever with no visible prompt on our end.
+  shell = new Dealer({ routingId: SESSION })
   shell.connect(`tcp://127.0.0.1:${ports.shell_port}`)
 
   iopub = new Subscriber()
   iopub.connect(`tcp://127.0.0.1:${ports.iopub_port}`)
   iopub.subscribe()
 
-  stdin = new Dealer()
+  stdin = new Dealer({ routingId: SESSION })
   stdin.connect(`tcp://127.0.0.1:${ports.stdin_port}`)
 
   await waitForKernel()
@@ -238,7 +247,7 @@ async function listenIopub() {
   }
 }
 
-async function execute(id, code) {
+async function execute(id, code, allowStdin) {
   const frames = buildMessage(
     "execute_request",
     {
@@ -246,7 +255,7 @@ async function execute(id, code) {
       silent: false,
       store_history: true,
       user_expressions: {},
-      allow_stdin: true,
+      allow_stdin: allowStdin === true,
       stop_on_error: true,
     },
     id,
@@ -360,7 +369,7 @@ rl.on("line", async (line) => {
   }
   try {
     if (msg.cmd === "start") await start(msg.kernel_name || "python3", msg.cwd)
-    else if (msg.cmd === "execute") await execute(msg.id, msg.code)
+    else if (msg.cmd === "execute") await execute(msg.id, msg.code, msg.allow_stdin)
     else if (msg.cmd === "interrupt") interrupt()
     else if (msg.cmd === "input_reply") await inputReply(msg.value)
     else if (msg.cmd === "shutdown") {
