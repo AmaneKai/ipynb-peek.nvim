@@ -161,4 +161,25 @@ describeKernel("real ipykernel workflow", () => {
     })
     expect(saved.cells[0].outputs[0].text.join("")).toContain("fresh output")
   }, 45000)
+
+  test("routes a kernel input_request to /input and resumes execution with the reply", async () => {
+    const code = 'name = input("What is your name? ")\nprint(f"Hello, {name}!")'
+    await post("/execute", { index: 0, code })
+
+    const request = await waitForMessage((message) => message.type === "input_request")
+    expect(request.index).toBe(0)
+    expect(request.prompt).toContain("What is your name?")
+    expect(request.password).toBe(false)
+
+    await post("/input", { value: "Carlo" })
+
+    const settled = await waitForMessage(
+      (message) =>
+        message.type === "cell_update" &&
+        message.index === 0 &&
+        message.cell.status === "idle" &&
+        message.cell.outputs.some((output: any) => output.content?.includes("Hello, Carlo!")),
+    )
+    expect(settled.cell.source).toBe(code)
+  }, 20000)
 })
