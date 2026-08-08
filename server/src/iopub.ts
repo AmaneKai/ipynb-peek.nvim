@@ -19,6 +19,13 @@ export function applyStatusMessage(
 ) {
   if (content.execution_state === "busy") {
     cell.status = "busy"
+    // ipykernel processes shell requests strictly in order - this "busy"
+    // status for OUR msg_id doesn't arrive until every earlier queued
+    // request has finished, so restamping started_at here (rather than
+    // trusting whatever /execute set at submission time) is what makes the
+    // reported duration reflect actual kernel execution time instead of
+    // time spent waiting behind another running cell.
+    cell.started_at = Date.now()
   } else if (content.execution_state === "idle") {
     cell.status = "idle"
     cell.duration_ms = cell.started_at ? Date.now() - cell.started_at : undefined
