@@ -262,6 +262,7 @@ function cellStatusInfo(cell, index) {
 function applyStatusMessage(cell, content, parentId, pendingExecs2) {
   if (content.execution_state === "busy") {
     cell.status = "busy";
+    cell.started_at = Date.now();
   } else if (content.execution_state === "idle") {
     cell.status = "idle";
     cell.duration_ms = cell.started_at ? Date.now() - cell.started_at : void 0;
@@ -620,6 +621,10 @@ var kernelReadyPromise = null;
 var kernelReadyResolve = null;
 var kernelReadyReject = null;
 var pendingExecs = /* @__PURE__ */ new Map();
+var pendingInputRequest = null;
+function inputRequestPayload() {
+  return JSON.stringify({ type: "input_request", ...pendingInputRequest });
+}
 function readLines(stream, onLine) {
   const rl = readline.createInterface({ input: stream });
   rl.on("line", (line) => {
@@ -712,14 +717,12 @@ function startBridge(kernelName) {
     else if (bridgeMessage.type === "input_request") {
       const pending = pendingExecs.get(bridgeMessage.parent_id);
       const index = pending ? pendingCellIndex(pending) : null;
-      broadcast(
-        JSON.stringify({
-          type: "input_request",
-          index,
-          prompt: String(bridgeMessage.prompt ?? ""),
-          password: bridgeMessage.password === true
-        })
-      );
+      pendingInputRequest = {
+        index,
+        prompt: String(bridgeMessage.prompt ?? ""),
+        password: bridgeMessage.password === true
+      };
+      broadcast(inputRequestPayload());
     } else if (bridgeMessage.type === "error") {
       const message = String(bridgeMessage.message ?? "kernel bridge error");
       if (bridgeMessage.operation === "start") failBridge(proc, message);
@@ -772,6 +775,7 @@ function cleanupBridge() {
   } catch {
   }
   pendingExecs.clear();
+  pendingInputRequest = null;
 }
 process.on("exit", cleanupBridge);
 process.on("SIGINT", () => {
@@ -912,11 +916,11 @@ async function handleRequest(req, res) {
       currentCells[index].outputs = [];
       currentCells[index].nbformat_outputs = [];
       currentCells[index].status = "busy";
-      currentCells[index].started_at = Date.now();
+      currentCells[index].started_at = void 0;
       currentCells[index].duration_ms = void 0;
       broadcastCell(index);
       try {
-        writeToBridge({ cmd: "execute", id: msgId, code });
+        writeToBridge({ cmd: "execute", id: msgId, code, allow_stdin: wsClients.size > 0 });
       } catch (error) {
         pendingExecs.delete(msgId);
         const message = String(error instanceof Error ? error.message : error);
@@ -940,6 +944,7 @@ async function handleRequest(req, res) {
     return handleJsonRoute(res, async () => {
       const body = JSON.parse(await readBody(req));
       writeToBridge({ cmd: "input_reply", value: String(body.value ?? "") });
+      pendingInputRequest = null;
     });
   }
   if (url.pathname === "/interrupt" && req.method === "POST") {
@@ -985,6 +990,7 @@ function createServer(port = Number(process.env.IPYNB_PEEK_PORT ?? 0), token = p
   wss.on("connection", (ws) => {
     wsClients.add(ws);
     ws.send(renderPayload());
+    if (pendingInputRequest) ws.send(inputRequestPayload());
     ws.on("message", (data) => {
       try {
         const parsedMessage = JSON.parse(data.toString());
