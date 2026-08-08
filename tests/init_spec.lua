@@ -262,3 +262,42 @@ describe("M.open notebook isolation", function()
     M.close()
   end)
 end)
+
+describe("InsertEnter guard on editable: false cells", function()
+  it("kicks back to normal mode and warns inside a non-editable cell", function()
+    local bufnr = make_buffer({ "# %% editable=false", "1 + 1", "# %%", "2 + 2" })
+    vim.api.nvim_buf_set_name(bufnr, vim.fn.tempname() .. ".ipynb")
+    M.open()
+    vim.api.nvim_win_set_cursor(0, { 2, 0 })
+
+    local notifications = {}
+    local original_notify = vim.notify
+    vim.notify = function(message)
+      table.insert(notifications, message)
+    end
+    vim.api.nvim_exec_autocmds("InsertEnter", { buffer = bufnr })
+    vim.notify = original_notify
+
+    assert.are.equal(1, #notifications)
+    assert.is_true(notifications[1]:find("read%-only") ~= nil)
+    M.close()
+  end)
+
+  it("does not warn inside an editable cell", function()
+    local bufnr = make_buffer({ "# %%", "1 + 1" })
+    vim.api.nvim_buf_set_name(bufnr, vim.fn.tempname() .. ".ipynb")
+    M.open()
+    vim.api.nvim_win_set_cursor(0, { 2, 0 })
+
+    local notifications = {}
+    local original_notify = vim.notify
+    vim.notify = function(message)
+      table.insert(notifications, message)
+    end
+    vim.api.nvim_exec_autocmds("InsertEnter", { buffer = bufnr })
+    vim.notify = original_notify
+
+    assert.are.equal(0, #notifications)
+    M.close()
+  end)
+end)

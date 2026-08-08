@@ -8,6 +8,9 @@ import readline from "node:readline";
 import { WebSocketServer, WebSocket } from "ws";
 
 // src/notebook.ts
+function isCellDeletable(cell) {
+  return cell?.metadata?.deletable !== false;
+}
 function joinSource(src) {
   if (!src) return "";
   return Array.isArray(src) ? src.join("") : src;
@@ -1000,7 +1003,7 @@ function createServer(port = Number(process.env.IPYNB_PEEK_PORT ?? 0), token = p
             after_index: parsedMessage.after_index,
             cell_type: parsedMessage.cell_type
           });
-        } else if (parsedMessage.type === "delete_cell" && Number.isInteger(parsedMessage.index) && parsedMessage.index >= 0) {
+        } else if (parsedMessage.type === "delete_cell" && Number.isInteger(parsedMessage.index) && parsedMessage.index >= 0 && isCellDeletable(currentCells[parsedMessage.index])) {
           emitEvent({ type: "delete_cell", index: parsedMessage.index });
         }
       } catch (error) {

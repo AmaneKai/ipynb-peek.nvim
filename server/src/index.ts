@@ -11,6 +11,7 @@ import {
   syncCells,
   patchNotebookOutputs,
   cellStatusInfo,
+  isCellDeletable,
   type RenderedCell,
 } from "./notebook"
 import { handleIopub, reconcileBusyStatus, type PendingExec } from "./iopub"
@@ -682,7 +683,8 @@ export function createServer(
         } else if (
           parsedMessage.type === "delete_cell" &&
           Number.isInteger(parsedMessage.index) &&
-          parsedMessage.index >= 0
+          parsedMessage.index >= 0 &&
+          isCellDeletable(currentCells[parsedMessage.index])
         ) {
           emitEvent({ type: "delete_cell", index: parsedMessage.index })
         }

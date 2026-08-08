@@ -37,6 +37,17 @@ export type RenderedCell = {
   metadata?: CellMetadata
 }
 
+/**
+ * The browser's own delete button is already hidden for a cell whose
+ * metadata says deletable: false (cosmetic only - a raw WS message bypasses
+ * it entirely), so this is the actual enforcement point. Absent metadata
+ * defaults to deletable, matching nbformat's own "unset means allowed"
+ * convention.
+ */
+export function isCellDeletable(cell: RenderedCell | undefined): boolean {
+  return cell?.metadata?.deletable !== false
+}
+
 export function joinSource(src: string | string[] | undefined): string {
   if (!src) return ""
 

@@ -97,9 +97,19 @@ const SESSION = randomUUID()
 let shell = null
 let iopub = null
 let stdin = null
+let control = null
 let kernelProcess = null
 let connectionDir = null
 let kernelStderr = ""
+/**
+ * From the kernelspec's own `interrupt_mode` ("signal" if the field is
+ * absent, per the kernelspec format) - "message" kernels (remote/
+ * containerized kernels, and some non-Python ones) don't reliably receive
+ * or act on OS signals at all, so interrupt() has to ask over the control
+ * channel instead. Re-read on every /restart, since a kernel switch can
+ * change it.
+ */
+let interruptMode = "signal"
 /**
  * The header of the input_request currently awaiting a reply on the stdin
  * channel - ipykernel blocks the whole shell channel on input(), so only
@@ -172,6 +182,7 @@ async function start(kernelName, cwd) {
       .replace("{connection_file}", connFile)
       .replace("{resource_dir}", kernelEntry.resource_dir),
   )
+  interruptMode = kernelEntry.spec.interrupt_mode === "message" ? "message" : "signal"
 
   kernelProcess = await spawnKernelProcess(argv, cwd, expandKernelEnv(kernelEntry.spec.env))
   kernelProcess.on("exit", (code) => {
@@ -200,6 +211,9 @@ async function start(kernelName, cwd) {
 
   stdin = new Dealer({ routingId: SESSION })
   stdin.connect(`tcp://127.0.0.1:${ports.stdin_port}`)
+
+  control = new Dealer({ routingId: SESSION })
+  control.connect(`tcp://127.0.0.1:${ports.control_port}`)
 
   await waitForKernel()
   emit({ type: "ready" })
@@ -311,6 +325,17 @@ async function inputReply(value) {
 }
 
 /**
+ * "message"-mode kernels (see interruptMode above) don't act on OS signals,
+ * so this is the only way to actually stop one - the reply comes back as a
+ * normal iopub status/error sequence for whatever execute_request was in
+ * flight, same as the signal path, so no extra bookkeeping is needed here.
+ */
+async function interruptViaControlChannel() {
+  const frames = buildMessage("interrupt_request", {}, randomUUID(), KEY, SESSION)
+  await control.send(frames)
+}
+
+/**
  * SIGINT is ipykernel's default `interrupt_mode` ("signal") - its own
  * execution loop catches KeyboardInterrupt and reports it back over iopub
  * as a normal error message for whatever execute_request was in flight, so
@@ -319,9 +344,18 @@ async function inputReply(value) {
  * process instead of interrupting it, which would leave this bridge alive
  * but pointing at a dead kernel (unlike shutdown/restart, nothing here
  * clears kernelProcess or respawns it), so a subsequent /execute would hang
- * forever waiting on a kernel that's gone. Refuse rather than risk that.
+ * forever waiting on a kernel that's gone. Refuse rather than risk that -
+ * "message"-mode kernels aren't affected, since they never touch signals.
  */
-function interrupt() {
+async function interrupt() {
+  if (interruptMode === "message") {
+    try {
+      await interruptViaControlChannel()
+    } catch (error) {
+      emit({ type: "error", message: "failed to interrupt kernel: " + String(error?.stack || error) })
+    }
+    return
+  }
   if (process.platform === "win32") {
     emit({
       type: "error",

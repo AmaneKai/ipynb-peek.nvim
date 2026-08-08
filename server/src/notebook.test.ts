@@ -13,6 +13,7 @@ import {
   toNbformatOutput,
   patchNotebookOutputs,
   cellStatusInfo,
+  isCellDeletable,
   type CellOutput,
   type RenderedCell,
 } from "./notebook"
@@ -280,6 +281,20 @@ describe("readCellMetadata", () => {
   test("reads string tags, filtering out non-string entries", () => {
     const metadata = readCellMetadata({ metadata: { tags: ["skip-run-all", 5, "slow"] } })
     expect(metadata.tags).toEqual(["skip-run-all", "slow"])
+  })
+})
+
+describe("isCellDeletable", () => {
+  test("is true when metadata is absent", () => {
+    expect(isCellDeletable(undefined)).toBe(true)
+  })
+
+  test("is true when deletable is unset", () => {
+    expect(isCellDeletable({ metadata: {} } as RenderedCell)).toBe(true)
+  })
+
+  test("is false only when deletable is explicitly false", () => {
+    expect(isCellDeletable({ metadata: { deletable: false } } as RenderedCell)).toBe(false)
   })
 })
 

@@ -18,15 +18,24 @@ describe("cells.parse", function()
     local bufnr = make_buffer({ "# %%", "1 + 1" })
     local parsed = cells.parse(bufnr)
     assert.are.equal(1, #parsed)
-    assert.are.same({ start_line = 1, end_line = 2, cell_type = "code", tags = {} }, parsed[1])
+    assert.are.same(
+      { start_line = 1, end_line = 2, cell_type = "code", tags = {}, editable = true, deletable = true },
+      parsed[1]
+    )
   end)
 
   it("splits multiple cells at each `# %%` marker", function()
     local bufnr = make_buffer({ "# %%", "1 + 1", "# %%", "2 + 2" })
     local parsed = cells.parse(bufnr)
     assert.are.equal(2, #parsed)
-    assert.are.same({ start_line = 1, end_line = 2, cell_type = "code", tags = {} }, parsed[1])
-    assert.are.same({ start_line = 3, end_line = 4, cell_type = "code", tags = {} }, parsed[2])
+    assert.are.same(
+      { start_line = 1, end_line = 2, cell_type = "code", tags = {}, editable = true, deletable = true },
+      parsed[1]
+    )
+    assert.are.same(
+      { start_line = 3, end_line = 4, cell_type = "code", tags = {}, editable = true, deletable = true },
+      parsed[2]
+    )
   end)
 
   it("detects a `# %% [markdown]` marker as a markdown cell", function()
@@ -60,6 +69,20 @@ describe("cells.parse", function()
     local bufnr = make_buffer({ "# %%", "1 + 1" })
     local parsed = cells.parse(bufnr)
     assert.are.same({}, parsed[1].tags)
+  end)
+
+  it("parses editable=false and deletable=false off the marker line", function()
+    local bufnr = make_buffer({ "# %% deletable=false editable=false", "1 + 1" })
+    local parsed = cells.parse(bufnr)
+    assert.is_false(parsed[1].editable)
+    assert.is_false(parsed[1].deletable)
+  end)
+
+  it("defaults editable and deletable to true when the marker has neither", function()
+    local bufnr = make_buffer({ "# %%", "1 + 1" })
+    local parsed = cells.parse(bufnr)
+    assert.is_true(parsed[1].editable)
+    assert.is_true(parsed[1].deletable)
   end)
 end)
 

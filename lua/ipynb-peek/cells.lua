@@ -20,9 +20,20 @@ local function parse_tags(line)
   return tags
 end
 
+--- Extracts a jupytext percent-format marker line's `editable=false` (or
+--- `deletable=false`) attribute, if present - jupytext round-trips both
+--- straight from nbformat's cell.metadata onto the marker line, the same
+--- convention as tags=[...] above (verified directly against jupytext's
+--- own ipynb->py:percent conversion). Absent entirely means true, matching
+--- nbformat's own "unset means editable/deletable" convention.
+local function parse_bool_attr(line, name)
+  return line:match(name .. "%s*=%s*false") == nil
+end
+
 --- Parses a jupytext "light" format buffer (`# %%`-delimited) into cells.
---- Returns an array of { start_line, end_line, cell_type, tags }, both
---- 1-indexed and inclusive, where start_line is the marker line itself.
+--- Returns an array of { start_line, end_line, cell_type, tags, editable,
+--- deletable }, both 1-indexed and inclusive, where start_line is the
+--- marker line itself.
 function M.parse(bufnr)
   local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
   local parsed = {}
@@ -39,7 +50,13 @@ function M.parse(bufnr)
         table.insert(parsed, current)
       end
       local cell_type = is_markdown and "markdown" or (is_raw and "raw" or "code")
-      current = { start_line = line_number, cell_type = cell_type, tags = parse_tags(line) }
+      current = {
+        start_line = line_number,
+        cell_type = cell_type,
+        tags = parse_tags(line),
+        editable = parse_bool_attr(line, "editable"),
+        deletable = parse_bool_attr(line, "deletable"),
+      }
     end
   end
 

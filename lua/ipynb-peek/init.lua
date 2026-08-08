@@ -118,6 +118,88 @@ local function schedule_render(bufnr)
   )
 end
 
+--- External file-change detection: watches the notebook's *directory*, not
+--- the file directly - a watch on the file itself breaks across an atomic
+--- temp-file+rename write (what this plugin's own persist.ts does, and what
+--- many external tools/editors do too), since the original inode goes away
+--- - and warns if the notebook file changes on disk while this buffer has
+--- unsaved edits that a reload could conflict with (see
+--- handle_external_change for why it only ever warns, never reloads).
+--- Debounced briefly since some tools emit more than one filesystem event
+--- per save.
+local file_watch_handle = nil
+local file_watch_timer = nil
+
+--- Deliberately never attempts to reload the buffer, unlike a plain file's
+--- :checktime. jupytext.vim's own BufReadCmd handler (`s:read_from_ipynb`)
+--- is only safe to run once, on a genuinely empty buffer (the initial
+--- :edit) - confirmed directly against its source, it works by a literal
+--- `:read` (insert-after-cursor) plus a hardcoded `:1delete` to drop one
+--- known-spurious blank line, with no general "replace everything cleanly"
+--- path. Re-invoking it via :checktime/:e! on an already-populated buffer
+--- inserts the freshly-converted content at the cursor instead of replacing
+--- anything, corrupting the buffer. So this only ever warns, and only for
+--- the case that actually risks losing something: unsaved edits sitting on
+--- top of a file that just changed underneath them. A clean (unmodified)
+--- buffer is left alone entirely - most such events are just this plugin's
+--- own execution results being persisted, and warning on every single one
+--- would be pure noise with no safe action to suggest anyway.
+local function handle_external_change(bufnr)
+  if active_bufnr ~= bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
+  if not vim.bo[bufnr].modified then
+    return
+  end
+  vim.notify(
+    "[ipynb-peek] the notebook file changed on disk while this buffer has unsaved edits - "
+      .. "save with a different approach in mind, or check the file's diff, before writing",
+    vim.log.levels.WARN
+  )
+end
+
+--- fs_event/timer callbacks run in Neovim's "fast event context", where
+--- most nvim_*/vim.notify/vim.cmd calls are disallowed directly - matches
+--- the vim.schedule(...) wrapping already used around client.lua's own
+--- job-callback handlers, for the same reason.
+local function start_file_watcher(bufnr, path)
+  local dir = vim.fn.fnamemodify(path, ":h")
+  local name = vim.fn.fnamemodify(path, ":t")
+
+  file_watch_handle = uv.new_fs_event()
+  file_watch_handle:start(dir, {}, function(err, filename)
+    if err or filename ~= name then
+      return
+    end
+    if file_watch_timer then
+      file_watch_timer:stop()
+      file_watch_timer:close()
+    end
+    file_watch_timer = uv.new_timer()
+    file_watch_timer:start(200, 0, function()
+      file_watch_timer:stop()
+      file_watch_timer:close()
+      file_watch_timer = nil
+      vim.schedule(function()
+        handle_external_change(bufnr)
+      end)
+    end)
+  end)
+end
+
+local function stop_file_watcher()
+  if file_watch_timer then
+    file_watch_timer:stop()
+    file_watch_timer:close()
+    file_watch_timer = nil
+  end
+  if file_watch_handle then
+    file_watch_handle:stop()
+    file_watch_handle:close()
+    file_watch_handle = nil
+  end
+end
+
 --- Live-typing sync (peek.nvim-style): the buffer isn't valid notebook JSON
 --- while jupytext owns it, so this parses cell source directly out of the
 --- `# %%` buffer instead of re-POSTing to /render on every keystroke. The
@@ -862,6 +944,7 @@ function M.open()
   active_bufnr = bufnr
   open_generation = open_generation + 1
   local generation = open_generation
+  start_file_watcher(bufnr, vim.api.nvim_buf_get_name(bufnr))
 
   if server.start({ server_dir = M.config.server_dir, theme = M.config.theme }) == false then
     active_bufnr = nil
@@ -927,6 +1010,28 @@ function M.open()
     end,
   })
 
+  --- editable:false cells (see cells.parse) shouldn't accept typed edits -
+  --- Neovim has no notion of a per-region readonly, so this is enforced by
+  --- kicking straight back out of insert mode the instant it's entered
+  --- inside one, with a warning explaining why. Deliberately doesn't try to
+  --- catch every possible normal-mode edit too (dd, p, macros, :s///) -
+  --- reliably intercepting and reverting those without risking unrelated
+  --- undo history is a much bigger, riskier feature; this covers the
+  --- dominant "started typing into it" case.
+  vim.api.nvim_create_autocmd("InsertEnter", {
+    group = aug,
+    buffer = bufnr,
+    callback = function()
+      local line = vim.api.nvim_win_get_cursor(0)[1]
+      local parsed = cells.parse(bufnr)
+      local _, cell = cells.cell_index_at(parsed, line)
+      if cell and not cell.editable then
+        vim.cmd("stopinsert")
+        vim.notify("[ipynb-peek] this cell is marked read-only (editable: false)", vim.log.levels.WARN)
+      end
+    end,
+  })
+
   --- Closing the notebook buffer (not just switching away from it) closes
   --- the preview too, rather than leaving a dead server + popup behind.
   vim.api.nvim_create_autocmd({ "BufDelete", "BufWipeout" }, {
@@ -964,6 +1069,7 @@ end
 function M.close()
   open_generation = open_generation + 1
   cancel_run_all()
+  stop_file_watcher()
   if server.port then
     browser.close("ipynb-peek:" .. server.port)
   end
