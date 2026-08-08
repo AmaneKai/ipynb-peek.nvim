@@ -133,6 +133,42 @@ describe("cells.source", function()
 
     assert.are.equal("1 + 1\n2 + 2", cells.source(bufnr, parsed[1]))
   end)
+
+  it("un-escapes a jupytext-commented line magic", function()
+    local bufnr = make_buffer({ "# %%", '# %time print("hi")' })
+    local parsed = cells.parse(bufnr)
+
+    assert.are.equal('%time print("hi")', cells.source(bufnr, parsed[1]))
+  end)
+
+  it("un-escapes a jupytext-commented shell escape", function()
+    local bufnr = make_buffer({ "# %%", "# !printf 'hi\\n'" })
+    local parsed = cells.parse(bufnr)
+
+    assert.are.equal("!printf 'hi\\n'", cells.source(bufnr, parsed[1]))
+  end)
+
+
+  it("preserves indentation when un-escaping a magic", function()
+    local bufnr = make_buffer({ "# %%", "if True:", "    # %time foo()" })
+    local parsed = cells.parse(bufnr)
+
+    assert.are.equal("if True:\n    %time foo()", cells.source(bufnr, parsed[1]))
+  end)
+
+  it("leaves an ordinary comment starting with `#` untouched", function()
+    local bufnr = make_buffer({ "# %%", "# just a regular comment", "1 + 1" })
+    local parsed = cells.parse(bufnr)
+
+    assert.are.equal("# just a regular comment\n1 + 1", cells.source(bufnr, parsed[1]))
+  end)
+
+  it("does not un-escape non-code cells", function()
+    local bufnr = make_buffer({ "# %% [raw]", "# %not-a-magic-in-a-raw-cell" })
+    local parsed = cells.parse(bufnr)
+
+    assert.are.equal("# %not-a-magic-in-a-raw-cell", cells.source(bufnr, parsed[1]))
+  end)
 end)
 
 describe("cells.display_source", function()
