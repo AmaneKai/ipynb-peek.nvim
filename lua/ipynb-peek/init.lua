@@ -51,6 +51,7 @@ M.config = {
     interrupt_kernel = "<leader>ji",
     next_cell = "<leader>jj",
     prev_cell = "<leader>jk",
+    goto_cell = "<leader>jg",
   },
 }
 
@@ -322,6 +323,53 @@ end
 --- skipping over markdown cells along the way.
 function M.jump_to_previous_cell()
   jump_cell("previous")
+end
+
+--- Jumps straight to cell `target` (1-indexed, matching the cell-number
+--- badge shown in the top-left of every cell in the preview) - includes
+--- markdown/raw cells too, since that badge counts every cell, not just
+--- code ones. Meant for landing on whatever cell a traceback or the preview
+--- pointed you at without counting `# %%` markers by eye.
+---
+--- Resolution order: an explicit `target` (from :IpynbPeekGotoCell's
+--- argument) wins; otherwise a numeric count prefix (`5<leader>jg`) is used
+--- directly with no prompt; otherwise falls back to vim.ui.input. Like
+--- jump_to_next_cell/jump_to_previous_cell, this is pure buffer navigation -
+--- no preview or kernel required.
+function M.jump_to_cell(target)
+  local bufnr = vim.api.nvim_get_current_buf()
+  local parsed = cells.parse(bufnr)
+  if warn_if_unparseable(parsed) then
+    return
+  end
+
+  local function land(number)
+    number = tonumber(number)
+    if not number or number ~= math.floor(number) or not parsed[number] then
+      vim.notify(
+        "[ipynb-peek] no cell " .. tostring(number) .. " - this notebook has " .. #parsed .. " cells",
+        vim.log.levels.WARN
+      )
+      return
+    end
+    move_cursor_to_cell(bufnr, parsed[number])
+  end
+
+  if target and target > 0 then
+    land(target)
+    return
+  end
+  if vim.v.count > 0 then
+    land(vim.v.count)
+    return
+  end
+
+  vim.ui.input({ prompt = "ipynb-peek: jump to cell # " }, function(input)
+    if input == nil or input == "" then
+      return
+    end
+    land(input)
+  end)
 end
 
 --- Keyed by 0-based cell index; fulfilled from handle_event_line's
@@ -748,6 +796,7 @@ local KEYMAP_ACTIONS = {
   interrupt_kernel = { fn = M.interrupt_kernel, desc = "ipynb-peek: interrupt kernel" },
   next_cell = { fn = M.jump_to_next_cell, desc = "ipynb-peek: jump to next code cell" },
   prev_cell = { fn = M.jump_to_previous_cell, desc = "ipynb-peek: jump to previous code cell" },
+  goto_cell = { fn = M.jump_to_cell, desc = "ipynb-peek: jump to cell number" },
 }
 
 --- Sets each default (or user-overridden) keymap from M.config.keymaps,
@@ -941,5 +990,10 @@ vim.api.nvim_create_user_command("IpynbPeekRestartKernel", M.restart_kernel, {})
 vim.api.nvim_create_user_command("IpynbPeekInterruptKernel", M.interrupt_kernel, {})
 vim.api.nvim_create_user_command("IpynbPeekNextCodeCell", M.jump_to_next_cell, {})
 vim.api.nvim_create_user_command("IpynbPeekPreviousCodeCell", M.jump_to_previous_cell, {})
+--- `:IpynbPeekGotoCell 5` jumps straight there; `:IpynbPeekGotoCell` with no
+--- argument falls back to M.jump_to_cell's vim.ui.input prompt.
+vim.api.nvim_create_user_command("IpynbPeekGotoCell", function(opts)
+  M.jump_to_cell(opts.args ~= "" and tonumber(opts.args) or nil)
+end, { nargs = "?" })
 
 return M

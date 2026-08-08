@@ -11,6 +11,7 @@ Neovim isn't a great place to *look at* a notebook - cell outputs, images, rende
 - **Real code execution.** `:IpynbPeekRunCell` / `:IpynbPeekRunAll` run against an actual `ipykernel` process - the notebook's own kernel, in its own venv, with its own working directory (relative paths like `../data/foo.csv` resolve exactly like they would in Jupyter or VS Code). Output streams in live, cell by cell, with a running execution timer while it's working and a final "ran in 1.2s" once it's done.
 - **Run cell and advance.** `:IpynbPeekRunCellAndAdvance` (VS Code's Shift+Enter) runs the current cell and moves your cursor straight to the next one.
 - **Jump between code cells.** `<leader>jj`/`<leader>jk` move the cursor to the next/previous *code* cell, skipping over markdown cells along the way - accepts numeric counts too (`3<leader>jj` jumps 3 code cells forward). No preview or kernel needed, just buffer navigation.
+- **Jump to a cell by number.** `<leader>jg` prompts for a cell number and lands you right on it - handy when the preview's cell-number badge (or a traceback) tells you exactly which cell to look at. Skip the prompt with a count, e.g. `5<leader>jg`.
 - **In-buffer status, not just in the popup.** Every cell's `# %%` marker line gets a sign-column icon (● busy, ✓ success, ✗ error) plus `[n] 1.2s` virtual text - so you know a cell finished or errored without ever looking away from the buffer you're typing in. Toggle with `inline_status`.
 - **Interrupt, not just restart.** `:IpynbPeekInterruptKernel`, or the ■ button that appears on a cell while it's running in the preview itself, stops whatever's currently running (`SIGINT`, same as Jupyter's own interrupt) without killing the kernel - your variables and imports survive, unlike a full restart.
 - **Cell insert/delete from the preview.** Hover between cells for "+ Code" / "+ Markdown" buttons, or hover a cell for a ✕ delete button - both land as real edits in your Neovim buffer (a genuine `# %%` block gets inserted or removed), not something trapped in the browser. Note this deletes the cell; it does not stop a running one - use the ■ interrupt button for that.
@@ -274,6 +275,7 @@ require("ipynb-peek").setup({
     interrupt_kernel = "<leader>ji",
     next_cell = "<leader>jj",
     prev_cell = "<leader>jk",
+    goto_cell = "<leader>jg",
   },
 })
 ```
@@ -291,6 +293,7 @@ require("ipynb-peek").setup({
 | `:IpynbPeekInterruptKernel` | Stop whatever's currently running, keeping the kernel's state intact - POSIX only, see [Troubleshooting](#troubleshooting) |
 | `:IpynbPeekNextCodeCell` | Jump to the next code cell, skipping markdown cells |
 | `:IpynbPeekPreviousCodeCell` | Jump to the previous code cell, skipping markdown cells |
+| `:IpynbPeekGotoCell [n]` | Jump straight to cell `n` (1-indexed, matching the cell-number badge in the preview) - prompts for a number if `n` is omitted |
 
 ## Default keymaps
 
@@ -307,6 +310,7 @@ Buffer-local, set as soon as you open a `.ipynb` file:
 | `<leader>ji` | Interrupt kernel |
 | `<leader>jj` | Jump to next code cell, skipping markdown cells (accepts a count, e.g. `3<leader>jj`) |
 | `<leader>jk` | Jump to previous code cell, skipping markdown cells (accepts a count, e.g. `3<leader>jk`) |
+| `<leader>jg` | Jump straight to a cell by number - prompts via `vim.ui.input`, or skip the prompt with a count, e.g. `5<leader>jg` |
 
 Override or disable any of these via `setup({ keymaps = { ... } })` - see [Configuration](#configuration).
 

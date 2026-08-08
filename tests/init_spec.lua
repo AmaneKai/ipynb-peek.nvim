@@ -174,6 +174,73 @@ describe("M.jump_to_next_cell / M.jump_to_previous_cell", function()
   end)
 end)
 
+describe("M.jump_to_cell", function()
+  local lines = { "# %%", "1", "", "# %%", "2", "", "# %%", "3", "", "# %%", "4" }
+
+  before_each(function()
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "x", false)
+  end)
+
+  it("jumps directly to the given cell number, no prompt", function()
+    make_buffer(lines)
+    vim.api.nvim_win_set_cursor(0, { 2, 0 })
+
+    M.jump_to_cell(3)
+
+    assert.are.equal(8, vim.api.nvim_win_get_cursor(0)[1])
+  end)
+
+  it("honors a numeric count typed before the mapped key, no prompt", function()
+    local bufnr = make_buffer(lines)
+    vim.keymap.set("n", "]g", M.jump_to_cell, { buffer = bufnr })
+    vim.api.nvim_win_set_cursor(0, { 2, 0 })
+
+    vim.api.nvim_feedkeys("4]g", "x", false)
+
+    assert.are.equal(11, vim.api.nvim_win_get_cursor(0)[1])
+  end)
+
+  it("falls back to vim.ui.input when given no target and no count", function()
+    make_buffer(lines)
+    vim.api.nvim_win_set_cursor(0, { 2, 0 })
+    local prompted
+    local original_input = vim.ui.input
+    vim.ui.input = function(opts, on_confirm)
+      prompted = opts
+      on_confirm("3")
+    end
+
+    M.jump_to_cell()
+    vim.ui.input = original_input
+
+    assert.is_not_nil(prompted)
+    assert.are.equal(8, vim.api.nvim_win_get_cursor(0)[1])
+  end)
+
+  it("does nothing if the prompt is cancelled", function()
+    make_buffer(lines)
+    vim.api.nvim_win_set_cursor(0, { 2, 0 })
+    local original_input = vim.ui.input
+    vim.ui.input = function(_, on_confirm)
+      on_confirm(nil)
+    end
+
+    M.jump_to_cell()
+    vim.ui.input = original_input
+
+    assert.are.equal(2, vim.api.nvim_win_get_cursor(0)[1])
+  end)
+
+  it("warns and leaves the cursor put for an out-of-range cell number", function()
+    make_buffer(lines)
+    vim.api.nvim_win_set_cursor(0, { 2, 0 })
+
+    M.jump_to_cell(99)
+
+    assert.are.equal(2, vim.api.nvim_win_get_cursor(0)[1])
+  end)
+end)
+
 describe("M.open notebook isolation", function()
   it("rejects a second notebook instead of sharing singleton server state", function()
     local first = make_buffer({ "# %%", "1" })
