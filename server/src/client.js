@@ -19,6 +19,12 @@ hljs.registerLanguage("python", python)
   const sessionToken = document.querySelector('meta[name="ipynb-peek-token"]')?.content || ""
   const cellEls = []
   const cellTimers = []
+  // Cells whose source/outputs the user has manually revealed past what
+  // source_hidden/outputs_hidden metadata says to hide by default - kept
+  // keyed by index across re-renders so a toggle survives live-typing
+  // updates to other cells.
+  const revealedSource = new Set()
+  const revealedOutputs = new Set()
 
   const lightbox = document.getElementById("lightbox")
   const lightboxImg = document.getElementById("lightbox-img")
@@ -32,6 +38,46 @@ hljs.registerLanguage("python", python)
   lightbox.addEventListener("click", closeLightbox)
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") closeLightbox()
+  })
+
+  /**
+   * A cell blocked on Python's input()/getpass() shows this bar rather than
+   * a browser-native window.prompt() - window.prompt can't mask a getpass()
+   * password field, and its synchronous nature would freeze this page's own
+   * websocket handling while it's up.
+   */
+  const stdinBar = document.getElementById("stdin-bar")
+  const stdinPromptText = document.getElementById("stdin-prompt-text")
+  const stdinInput = document.getElementById("stdin-input")
+  const stdinSend = document.getElementById("stdin-send")
+
+  function openStdinPrompt(prompt, password) {
+    stdinPromptText.textContent = prompt || "Input requested:"
+    stdinInput.type = password ? "password" : "text"
+    stdinInput.value = ""
+    stdinBar.classList.add("open")
+    stdinInput.focus()
+  }
+
+  function closeStdinPrompt() {
+    stdinBar.classList.remove("open")
+    stdinInput.value = ""
+  }
+
+  function submitStdinReply() {
+    if (!stdinBar.classList.contains("open")) return
+    const value = stdinInput.value
+    closeStdinPrompt()
+    fetch("/input", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-ipynb-peek-token": sessionToken },
+      body: JSON.stringify({ value }),
+    }).catch((error) => console.error("[ipynb-peek] failed to send stdin reply:", error))
+  }
+
+  stdinSend.addEventListener("click", submitStdinReply)
+  stdinInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") submitStdinReply()
   })
 
   /**
@@ -74,9 +120,9 @@ hljs.registerLanguage("python", python)
     }
   }
 
-  function renderOutputs(outputs) {
+  function renderOutputs(outputs, scrolled) {
     const wrap = document.createElement("div")
-    wrap.className = "outputs"
+    wrap.className = "outputs" + (scrolled ? " scrolled" : "")
     for (const out of outputs || []) {
       if (out.kind === "image") {
         const img = document.createElement("img")
@@ -85,6 +131,8 @@ hljs.registerLanguage("python", python)
           mime === "image/svg+xml"
             ? "data:image/svg+xml;charset=utf-8," + encodeURIComponent(out.data)
             : `data:${mime};base64,${out.data}`
+        if (out.width) img.style.width = out.width + "px"
+        if (out.height) img.style.height = out.height + "px"
         img.addEventListener("click", () => openLightbox(img.src))
         wrap.appendChild(img)
       } else if (out.kind === "html") {
@@ -92,6 +140,13 @@ hljs.registerLanguage("python", python)
         div.className = "table-scroll"
         div.innerHTML = out.content
         localizeImages(div)
+        wrap.appendChild(div)
+      } else if (out.kind === "markdown") {
+        const div = document.createElement("div")
+        div.className = "md-cell"
+        div.innerHTML = marked.parse(out.content || "")
+        localizeImages(div)
+        renderMath(div)
         wrap.appendChild(div)
       } else if (out.kind === "latex") {
         const div = document.createElement("div")
@@ -113,21 +168,50 @@ hljs.registerLanguage("python", python)
     return wrap
   }
 
+  function renderTagChips(cell) {
+    const tags = (cell.metadata && cell.metadata.tags) || []
+    if (!tags.length) return null
+    const tagsEl = document.createElement("div")
+    tagsEl.className = "cell-tags"
+    for (const tag of tags) {
+      const chip = document.createElement("span")
+      chip.className = "tag-chip"
+      chip.textContent = tag
+      tagsEl.appendChild(chip)
+    }
+    return tagsEl
+  }
+
+  function renderHiddenBar(label, onClick) {
+    const bar = document.createElement("button")
+    bar.className = "hidden-bar"
+    bar.textContent = label
+    bar.addEventListener("click", onClick)
+    return bar
+  }
+
   function renderCell(cell, index) {
     const el = document.createElement("div")
     el.className = "cell"
+
+    const metadata = cell.metadata || {}
 
     const cellNumber = document.createElement("div")
     cellNumber.className = "cell-number"
     cellNumber.textContent = String(index + 1)
     el.appendChild(cellNumber)
 
-    const deleteBtn = document.createElement("button")
-    deleteBtn.className = "delete-cell-btn"
-    deleteBtn.textContent = "✕"
-    deleteBtn.title = "Delete cell"
-    deleteBtn.addEventListener("click", () => sendDelete(index))
-    el.appendChild(deleteBtn)
+    const tagChips = renderTagChips(cell)
+    if (tagChips) el.appendChild(tagChips)
+
+    if (metadata.deletable !== false && metadata.editable !== false) {
+      const deleteBtn = document.createElement("button")
+      deleteBtn.className = "delete-cell-btn"
+      deleteBtn.textContent = "✕"
+      deleteBtn.title = "Delete cell"
+      deleteBtn.addEventListener("click", () => sendDelete(index))
+      el.appendChild(deleteBtn)
+    }
 
     if (cell.cell_type === "markdown") {
       el.classList.add("md-cell")
@@ -138,57 +222,80 @@ hljs.registerLanguage("python", python)
       el.appendChild(content)
     } else if (cell.cell_type === "code") {
       el.classList.add("code-cell")
-      const box = document.createElement("div")
-      box.className = "code-box"
 
-      const pre = document.createElement("pre")
-      const code = document.createElement("code")
-      code.className = "language-" + (cell.language || "python")
-      code.textContent = cell.source || ""
-      pre.appendChild(code)
-      box.appendChild(pre)
+      const sourceHidden = metadata.source_hidden && !revealedSource.has(index)
+      if (sourceHidden) {
+        el.appendChild(
+          renderHiddenBar("‣ input hidden - click to show", () => {
+            revealedSource.add(index)
+            updateCell(index, cell)
+          }),
+        )
+      } else {
+        const box = document.createElement("div")
+        box.className = "code-box"
 
-      const statusBar = document.createElement("span")
-      statusBar.className = "status-bar"
+        const pre = document.createElement("pre")
+        const code = document.createElement("code")
+        code.className = "language-" + (cell.language || "python")
+        code.textContent = cell.source || ""
+        pre.appendChild(code)
+        box.appendChild(pre)
 
-      const execCount = document.createElement("span")
-      execCount.className = "exec-count"
-      statusBar.appendChild(execCount)
+        const statusBar = document.createElement("span")
+        statusBar.className = "status-bar"
 
-      const timing = document.createElement("span")
-      timing.className = "timing"
-      statusBar.appendChild(timing)
+        const execCount = document.createElement("span")
+        execCount.className = "exec-count"
+        statusBar.appendChild(execCount)
 
-      function tick() {
-        if (cell.status !== "busy") {
-          execCount.classList.remove("busy")
-          execCount.textContent = cell.execution_count ? "[" + cell.execution_count + "]" : "[ ]"
-          timing.textContent = cell.duration_ms != null ? formatSeconds(cell.duration_ms) : ""
-          return
+        const timing = document.createElement("span")
+        timing.className = "timing"
+        statusBar.appendChild(timing)
+
+        function tick() {
+          if (cell.status !== "busy") {
+            execCount.classList.remove("busy")
+            execCount.textContent = cell.execution_count ? "[" + cell.execution_count + "]" : "[ ]"
+            timing.textContent = cell.duration_ms != null ? formatSeconds(cell.duration_ms) : ""
+            return
+          }
+          execCount.textContent = "[*]"
+          execCount.classList.add("busy")
+          timing.textContent = formatSeconds(Date.now() - (cell.started_at || Date.now()))
         }
-        execCount.textContent = "[*]"
-        execCount.classList.add("busy")
-        timing.textContent = formatSeconds(Date.now() - (cell.started_at || Date.now()))
-      }
-      tick()
-      if (cell.status === "busy") cellTimers[index] = setInterval(tick, 100)
+        tick()
+        if (cell.status === "busy") cellTimers[index] = setInterval(tick, 100)
 
-      box.appendChild(statusBar)
+        box.appendChild(statusBar)
 
-      const langLabel = document.createElement("span")
-      langLabel.className = "lang-label"
-      langLabel.textContent = cell.language || ""
-      box.appendChild(langLabel)
+        const langLabel = document.createElement("span")
+        langLabel.className = "lang-label"
+        langLabel.textContent = cell.language || ""
+        box.appendChild(langLabel)
 
-      el.appendChild(box)
+        el.appendChild(box)
 
-      try {
-        hljs.highlightElement(code)
-      } catch (error) {
-        console.error("[ipynb-peek] syntax highlighting failed:", error)
+        try {
+          hljs.highlightElement(code)
+        } catch (error) {
+          console.error("[ipynb-peek] syntax highlighting failed:", error)
+        }
       }
 
-      if (cell.outputs && cell.outputs.length) el.appendChild(renderOutputs(cell.outputs))
+      if (cell.outputs && cell.outputs.length) {
+        const outputsHidden = metadata.outputs_hidden && !revealedOutputs.has(index)
+        if (outputsHidden) {
+          el.appendChild(
+            renderHiddenBar("‣ output hidden - click to show", () => {
+              revealedOutputs.add(index)
+              updateCell(index, cell)
+            }),
+          )
+        } else {
+          el.appendChild(renderOutputs(cell.outputs, metadata.scrolled === true))
+        }
+      }
     } else {
       el.classList.add("raw-cell")
       const pre = document.createElement("pre")
@@ -231,6 +338,7 @@ hljs.registerLanguage("python", python)
   }
 
   function fullRender(cells) {
+    closeStdinPrompt()
     for (let position = 0; position < cellTimers.length; position++) clearCellTimer(position)
     container.innerHTML = ""
     cellEls.length = 0
@@ -278,11 +386,13 @@ hljs.registerLanguage("python", python)
         if (msg.type === "render") fullRender(msg.cells)
         else if (msg.type === "cell_update") updateCell(msg.index, msg.cell)
         else if (msg.type === "cursor") focusCell(msg.index)
+        else if (msg.type === "input_request") openStdinPrompt(msg.prompt, msg.password)
       } catch (error) {
         console.error("[ipynb-peek] failed to handle websocket message:", error)
       }
     }
     ws.onclose = () => {
+      closeStdinPrompt()
       setTimeout(connect, backoff)
       backoff = Math.min(backoff * 2, 5000)
     }

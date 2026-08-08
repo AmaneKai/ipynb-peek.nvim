@@ -72,13 +72,22 @@ describe("applyStreamMessage", () => {
 
   test("merges consecutive chunks from the same stream into one output", () => {
     const cell = makeCell()
+    applyStreamMessage(cell, { name: "stdout", text: ["chunk 0 "] })
+    applyStreamMessage(cell, { name: "stdout", text: ["chunk 1 "] })
+    applyStreamMessage(cell, { name: "stdout", text: ["chunk 2"] })
+
+    expect(cell.outputs).toEqual([
+      { kind: "text", content: "chunk 0 chunk 1 chunk 2", stream: "stdout" },
+    ])
+  })
+
+  test("a bare \\r overwrites the current line instead of stacking - e.g. tqdm progress bars", () => {
+    const cell = makeCell()
     applyStreamMessage(cell, { name: "stdout", text: ["\rprogress 0"] })
     applyStreamMessage(cell, { name: "stdout", text: ["\rprogress 1"] })
     applyStreamMessage(cell, { name: "stdout", text: ["\rprogress 2"] })
 
-    expect(cell.outputs).toEqual([
-      { kind: "text", content: "\rprogress 0\rprogress 1\rprogress 2", stream: "stdout" },
-    ])
+    expect(cell.outputs).toEqual([{ kind: "text", content: "progress 2", stream: "stdout" }])
   })
 
   test("keeps stdout and stderr as separate outputs even when interleaved", () => {
@@ -108,6 +117,28 @@ describe("applyResultMessage", () => {
     const cell = makeCell()
     applyResultMessage(cell, { data: { "text/latex": "$x^2$" } }, "display_data")
     expect(cell.outputs).toEqual([{ kind: "latex", content: "$x^2$" }])
+  })
+
+  test("renders text/markdown as a markdown output instead of falling back to text/plain", () => {
+    const cell = makeCell()
+    applyResultMessage(
+      cell,
+      { data: { "text/markdown": "**bold**", "text/plain": "**bold**" } },
+      "display_data",
+    )
+    expect(cell.outputs).toEqual([{ kind: "markdown", content: "**bold**" }])
+  })
+
+  test("carries requested display width/height through for a PNG", () => {
+    const cell = makeCell()
+    applyResultMessage(
+      cell,
+      { data: { "image/png": "data" }, metadata: { "image/png": { width: 300, height: 150 } } },
+      "display_data",
+    )
+    expect(cell.outputs).toEqual([
+      { kind: "image", mime: "image/png", data: "data", width: 300, height: 150 },
+    ])
   })
 
   test("pretty-prints application/json instead of falling back to a repr placeholder", () => {

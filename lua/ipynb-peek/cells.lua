@@ -1,8 +1,28 @@
 local M = {}
 
+--- Extracts a jupytext percent-format marker line's `tags=[...]` metadata
+--- (e.g. `# %% tags=["skip-run-all"]`), if present. Only `tags` is parsed -
+--- jupytext's marker-line metadata syntax supports arbitrary key/value
+--- pairs, but tags is the only one anything in this plugin currently acts
+--- on (see M.run_all's skip-run-all check).
+local function parse_tags(line)
+  local tags = {}
+  local list = line:match("tags%s*=%s*%[(.-)%]")
+  if not list then
+    return tags
+  end
+  for tag in list:gmatch('"([^"]*)"') do
+    table.insert(tags, tag)
+  end
+  for tag in list:gmatch("'([^']*)'") do
+    table.insert(tags, tag)
+  end
+  return tags
+end
+
 --- Parses a jupytext "light" format buffer (`# %%`-delimited) into cells.
---- Returns an array of { start_line, end_line, cell_type }, both 1-indexed
---- and inclusive, where start_line is the marker line itself.
+--- Returns an array of { start_line, end_line, cell_type, tags }, both
+--- 1-indexed and inclusive, where start_line is the marker line itself.
 function M.parse(bufnr)
   local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
   local parsed = {}
@@ -10,14 +30,16 @@ function M.parse(bufnr)
 
   for line_number, line in ipairs(lines) do
     local is_markdown = line:match("^# %%%%%s*%[markdown%]") ~= nil
-    local is_marker = is_markdown or line:match("^# %%%%") ~= nil
+    local is_raw = line:match("^# %%%%%s*%[raw%]") ~= nil
+    local is_marker = is_markdown or is_raw or line:match("^# %%%%") ~= nil
 
     if is_marker then
       if current then
         current.end_line = line_number - 1
         table.insert(parsed, current)
       end
-      current = { start_line = line_number, cell_type = is_markdown and "markdown" or "code" }
+      local cell_type = is_markdown and "markdown" or (is_raw and "raw" or "code")
+      current = { start_line = line_number, cell_type = cell_type, tags = parse_tags(line) }
     end
   end
 
@@ -60,13 +82,13 @@ function M.source(bufnr, cell)
   return table.concat(lines, "\n")
 end
 
---- Same as source(), but for markdown cells also strips jupytext's `# `
---- line-comment prefix (jupytext comments out markdown text so the file
---- stays valid Python; it strips this back out when converting to .ipynb
---- JSON on save - live-sync reads the raw buffer before that conversion
---- ever happens, so we have to undo it ourselves here).
+--- Same as source(), but for markdown and raw cells also strips jupytext's
+--- `# ` line-comment prefix (jupytext comments out non-code cell text so the
+--- file stays valid Python; it strips this back out when converting to
+--- .ipynb JSON on save - live-sync reads the raw buffer before that
+--- conversion ever happens, so we have to undo it ourselves here).
 function M.display_source(bufnr, cell)
-  if cell.cell_type ~= "markdown" then
+  if cell.cell_type ~= "markdown" and cell.cell_type ~= "raw" then
     return M.source(bufnr, cell)
   end
   local lines = vim.api.nvim_buf_get_lines(bufnr, cell.start_line, cell.end_line, false)

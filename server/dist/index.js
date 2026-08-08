@@ -15,16 +15,41 @@ function joinSource(src) {
 function stripAnsi(text) {
   return text.replace(/\x1b\[[0-9;]*m/g, "");
 }
+function applyCarriageReturns(text) {
+  return text.split("\n").map((line) => {
+    if (!line.includes("\r")) return line;
+    const trimmed = line.endsWith("\r") ? line.slice(0, -1) : line;
+    const index = trimmed.lastIndexOf("\r");
+    return index === -1 ? trimmed : trimmed.slice(index + 1);
+  }).join("\n");
+}
+function imageSize(output, mime) {
+  const meta = output.metadata?.[mime];
+  const width = typeof meta?.width === "number" ? meta.width : void 0;
+  const height = typeof meta?.height === "number" ? meta.height : void 0;
+  return { width, height };
+}
 function renderOutput(output) {
   const data = output.data ?? {};
   if (data["image/png"])
-    return { kind: "image", mime: "image/png", data: joinSource(data["image/png"]) };
+    return {
+      kind: "image",
+      mime: "image/png",
+      data: joinSource(data["image/png"]),
+      ...imageSize(output, "image/png")
+    };
   if (data["image/jpeg"])
-    return { kind: "image", mime: "image/jpeg", data: joinSource(data["image/jpeg"]) };
+    return {
+      kind: "image",
+      mime: "image/jpeg",
+      data: joinSource(data["image/jpeg"]),
+      ...imageSize(output, "image/jpeg")
+    };
   if (data["image/svg+xml"])
     return { kind: "image", mime: "image/svg+xml", data: joinSource(data["image/svg+xml"]) };
   if (data["text/html"]) return { kind: "html", content: joinSource(data["text/html"]) };
   if (data["text/latex"]) return { kind: "latex", content: joinSource(data["text/latex"]) };
+  if (data["text/markdown"]) return { kind: "markdown", content: joinSource(data["text/markdown"]) };
   if (output.output_type === "stream")
     return {
       kind: "text",
@@ -43,10 +68,24 @@ function renderOutput(output) {
 function appendOutput(outputs, newOutput) {
   const last = outputs[outputs.length - 1];
   if (last && last.kind === "text" && newOutput.kind === "text" && last.stream !== void 0 && last.stream === newOutput.stream) {
-    last.content += newOutput.content;
+    last.content = applyCarriageReturns(last.content + newOutput.content);
     return;
   }
-  outputs.push(newOutput);
+  outputs.push(
+    newOutput.kind === "text" ? { ...newOutput, content: applyCarriageReturns(newOutput.content) } : newOutput
+  );
+}
+function readCellMetadata(cell) {
+  const jupyterMeta = cell.metadata?.jupyter ?? {};
+  const tags = Array.isArray(cell.metadata?.tags) ? cell.metadata.tags.filter((tag) => typeof tag === "string") : [];
+  return {
+    source_hidden: jupyterMeta.source_hidden === true || cell.metadata?.hide_input === true,
+    outputs_hidden: jupyterMeta.outputs_hidden === true || cell.metadata?.collapsed === true || tags.includes("hide-output"),
+    editable: cell.metadata?.editable !== false,
+    deletable: cell.metadata?.deletable !== false,
+    scrolled: cell.metadata?.scrolled === "auto" ? "auto" : cell.metadata?.scrolled === true,
+    tags
+  };
 }
 function renderNotebook(nb) {
   const language = nb.metadata?.kernelspec?.language ?? nb.metadata?.language_info?.name ?? "python";
@@ -69,7 +108,8 @@ function renderNotebook(nb) {
       language: cell.cell_type === "code" ? language : void 0,
       execution_count: cell.cell_type === "code" ? cell.execution_count ?? null : void 0,
       outputs,
-      nbformat_outputs: cell.cell_type === "code" && Array.isArray(cell.outputs) ? structuredClone(cell.outputs) : void 0
+      nbformat_outputs: cell.cell_type === "code" && Array.isArray(cell.outputs) ? structuredClone(cell.outputs) : void 0,
+      metadata: readCellMetadata(cell)
     });
   }
   return cells;
@@ -156,12 +196,23 @@ function toNbformatOutput(output) {
       return { output_type: "display_data", data: { "text/html": [output.content] }, metadata: {} };
     case "latex":
       return { output_type: "display_data", data: { "text/latex": [output.content] }, metadata: {} };
-    case "image":
+    case "markdown":
       return {
         output_type: "display_data",
-        data: { [output.mime ?? "image/png"]: output.data },
+        data: { "text/markdown": [output.content] },
         metadata: {}
       };
+    case "image": {
+      const mime = output.mime ?? "image/png";
+      const size = {};
+      if (output.width) size.width = output.width;
+      if (output.height) size.height = output.height;
+      return {
+        output_type: "display_data",
+        data: { [mime]: output.data },
+        metadata: Object.keys(size).length ? { [mime]: size } : {}
+      };
+    }
     case "error":
       return {
         output_type: "error",
@@ -239,9 +290,19 @@ function applyStreamMessage(cell, content) {
 function applyResultMessage(cell, content, msgType) {
   const data = content.data ?? {};
   if (data["image/png"])
-    cell.outputs.push({ kind: "image", mime: "image/png", data: joinSource(data["image/png"]) });
+    cell.outputs.push({
+      kind: "image",
+      mime: "image/png",
+      data: joinSource(data["image/png"]),
+      ...imageSize(content, "image/png")
+    });
   else if (data["image/jpeg"])
-    cell.outputs.push({ kind: "image", mime: "image/jpeg", data: joinSource(data["image/jpeg"]) });
+    cell.outputs.push({
+      kind: "image",
+      mime: "image/jpeg",
+      data: joinSource(data["image/jpeg"]),
+      ...imageSize(content, "image/jpeg")
+    });
   else if (data["image/svg+xml"])
     cell.outputs.push({
       kind: "image",
@@ -252,6 +313,8 @@ function applyResultMessage(cell, content, msgType) {
     cell.outputs.push({ kind: "html", content: joinSource(data["text/html"]) });
   else if (data["text/latex"])
     cell.outputs.push({ kind: "latex", content: joinSource(data["text/latex"]) });
+  else if (data["text/markdown"])
+    cell.outputs.push({ kind: "markdown", content: joinSource(data["text/markdown"]) });
   else if (data["application/json"] !== void 0)
     cell.outputs.push({ kind: "text", content: JSON.stringify(data["application/json"], null, 2) });
   else if (data["text/plain"])
@@ -646,7 +709,18 @@ function startBridge(kernelName) {
           if (currentCells[index]?.status === "idle") void persistOutputsToDisk();
         }
       );
-    else if (bridgeMessage.type === "error") {
+    else if (bridgeMessage.type === "input_request") {
+      const pending = pendingExecs.get(bridgeMessage.parent_id);
+      const index = pending ? pendingCellIndex(pending) : null;
+      broadcast(
+        JSON.stringify({
+          type: "input_request",
+          index,
+          prompt: String(bridgeMessage.prompt ?? ""),
+          password: bridgeMessage.password === true
+        })
+      );
+    } else if (bridgeMessage.type === "error") {
       const message = String(bridgeMessage.message ?? "kernel bridge error");
       if (bridgeMessage.operation === "start") failBridge(proc, message);
       else if (bridgeMessage.operation === "execute" && bridgeMessage.id) {
@@ -860,6 +934,13 @@ async function handleRequest(req, res) {
     }
     broadcastFull();
     return sendJson(res, 200, { ok: true });
+  }
+  if (url.pathname === "/input" && req.method === "POST") {
+    if (!bridgeProc) return sendJson(res, 409, { ok: false, error: "no running kernel" });
+    return handleJsonRoute(res, async () => {
+      const body = JSON.parse(await readBody(req));
+      writeToBridge({ cmd: "input_reply", value: String(body.value ?? "") });
+    });
   }
   if (url.pathname === "/interrupt" && req.method === "POST") {
     if (!bridgeProc)

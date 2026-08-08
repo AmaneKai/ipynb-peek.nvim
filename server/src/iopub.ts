@@ -1,4 +1,4 @@
-import { joinSource, stripAnsi, appendOutput, type RenderedCell } from "./notebook"
+import { joinSource, stripAnsi, appendOutput, imageSize, type RenderedCell } from "./notebook"
 
 /**
  * What was actually submitted for execution - captured at /execute time so
@@ -51,9 +51,19 @@ export function applyResultMessage(cell: RenderedCell, content: any, msgType: st
   const data = content.data ?? {}
 
   if (data["image/png"])
-    cell.outputs.push({ kind: "image", mime: "image/png", data: joinSource(data["image/png"]) })
+    cell.outputs.push({
+      kind: "image",
+      mime: "image/png",
+      data: joinSource(data["image/png"]),
+      ...imageSize(content, "image/png"),
+    })
   else if (data["image/jpeg"])
-    cell.outputs.push({ kind: "image", mime: "image/jpeg", data: joinSource(data["image/jpeg"]) })
+    cell.outputs.push({
+      kind: "image",
+      mime: "image/jpeg",
+      data: joinSource(data["image/jpeg"]),
+      ...imageSize(content, "image/jpeg"),
+    })
   else if (data["image/svg+xml"])
     cell.outputs.push({
       kind: "image",
@@ -64,6 +74,8 @@ export function applyResultMessage(cell: RenderedCell, content: any, msgType: st
     cell.outputs.push({ kind: "html", content: joinSource(data["text/html"]) })
   else if (data["text/latex"])
     cell.outputs.push({ kind: "latex", content: joinSource(data["text/latex"]) })
+  else if (data["text/markdown"])
+    cell.outputs.push({ kind: "markdown", content: joinSource(data["text/markdown"]) })
   else if (data["application/json"] !== undefined)
     cell.outputs.push({ kind: "text", content: JSON.stringify(data["application/json"], null, 2) })
   else if (data["text/plain"])

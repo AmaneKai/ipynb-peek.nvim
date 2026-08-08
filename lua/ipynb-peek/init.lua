@@ -379,7 +379,7 @@ function M.run_all()
 
   local code_cells = {}
   for position, cell in ipairs(parsed) do
-    if cell.cell_type == "code" then
+    if cell.cell_type == "code" and not vim.tbl_contains(cell.tags or {}, "skip-run-all") then
       table.insert(code_cells, { index = position - 1, source = cells.source(bufnr, cell) })
     end
   end

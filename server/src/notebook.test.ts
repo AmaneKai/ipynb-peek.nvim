@@ -2,9 +2,12 @@ import { describe, test, expect } from "vitest"
 import {
   joinSource,
   stripAnsi,
+  applyCarriageReturns,
+  imageSize,
   renderOutput,
   appendOutput,
   renderNotebook,
+  readCellMetadata,
   mergeCells,
   syncCells,
   toNbformatOutput,
@@ -38,10 +41,58 @@ describe("stripAnsi", () => {
   })
 })
 
+describe("applyCarriageReturns", () => {
+  test("collapses a bare \\r to only the last write on that line", () => {
+    expect(applyCarriageReturns("\rprogress 0\rprogress 1\rprogress 2")).toBe("progress 2")
+  })
+
+  test("normalizes a trailing \\r before \\n instead of erasing the line", () => {
+    expect(applyCarriageReturns("foo\r\nbar")).toBe("foo\nbar")
+  })
+
+  test("only affects the line containing the \\r, not the whole text", () => {
+    expect(applyCarriageReturns("\ra\rb\nc\n")).toBe("b\nc\n")
+  })
+
+  test("leaves text with no carriage returns untouched", () => {
+    expect(applyCarriageReturns("plain\ntext")).toBe("plain\ntext")
+  })
+})
+
+describe("imageSize", () => {
+  test("reads width/height from the mime-keyed metadata bundle", () => {
+    const output = { metadata: { "image/png": { width: 100, height: 50 } } }
+    expect(imageSize(output, "image/png")).toEqual({ width: 100, height: 50 })
+  })
+
+  test("returns undefined fields when metadata is absent", () => {
+    expect(imageSize({}, "image/png")).toEqual({ width: undefined, height: undefined })
+  })
+})
+
 describe("renderOutput", () => {
   test("prefers an image over text/html when both are present", () => {
     const output = { data: { "image/png": "base64data", "text/html": "<b>x</b>" } }
     expect(renderOutput(output)).toEqual({ kind: "image", mime: "image/png", data: "base64data" })
+  })
+
+  test("carries requested display width/height through for a PNG", () => {
+    const output = {
+      data: { "image/png": "base64data" },
+      metadata: { "image/png": { width: 200, height: 100 } },
+    }
+    expect(renderOutput(output)).toEqual({
+      kind: "image",
+      mime: "image/png",
+      data: "base64data",
+      width: 200,
+      height: 100,
+    })
+  })
+
+  test("renders text/markdown as a markdown output instead of falling back to text/plain", () => {
+    const output = { data: { "text/markdown": "**bold**", "text/plain": "**bold**" } }
+    expect(renderOutput(output)).toEqual({ kind: "markdown", content: "**bold**" })
   })
 
   test("renders a stream output as text, tagged with its stream name", () => {
@@ -174,6 +225,61 @@ describe("renderNotebook", () => {
     const cells = renderNotebook(notebook)
 
     expect(cells[0].outputs).toEqual([{ kind: "text", content: "ab", stream: "stdout" }])
+  })
+
+  test("carries each cell's metadata through, including skip-run-all-style tags", () => {
+    const notebook = {
+      metadata: {},
+      cells: [
+        {
+          cell_type: "code",
+          source: ["1 + 1"],
+          outputs: [],
+          metadata: { jupyter: { source_hidden: true }, tags: ["skip-run-all"] },
+        },
+      ],
+    }
+
+    const cells = renderNotebook(notebook)
+
+    expect(cells[0].metadata).toMatchObject({ source_hidden: true, tags: ["skip-run-all"] })
+  })
+})
+
+describe("readCellMetadata", () => {
+  test("defaults to visible/editable/deletable with no tags for a bare cell", () => {
+    expect(readCellMetadata({})).toEqual({
+      source_hidden: false,
+      outputs_hidden: false,
+      editable: true,
+      deletable: true,
+      scrolled: false,
+      tags: [],
+    })
+  })
+
+  test("reads jupyter.source_hidden and jupyter.outputs_hidden", () => {
+    const metadata = readCellMetadata({
+      metadata: { jupyter: { source_hidden: true, outputs_hidden: true } },
+    })
+    expect(metadata.source_hidden).toBe(true)
+    expect(metadata.outputs_hidden).toBe(true)
+  })
+
+  test("reads editable: false and deletable: false", () => {
+    const metadata = readCellMetadata({ metadata: { editable: false, deletable: false } })
+    expect(metadata.editable).toBe(false)
+    expect(metadata.deletable).toBe(false)
+  })
+
+  test("reads scrolled: true and scrolled: 'auto'", () => {
+    expect(readCellMetadata({ metadata: { scrolled: true } }).scrolled).toBe(true)
+    expect(readCellMetadata({ metadata: { scrolled: "auto" } }).scrolled).toBe("auto")
+  })
+
+  test("reads string tags, filtering out non-string entries", () => {
+    const metadata = readCellMetadata({ metadata: { tags: ["skip-run-all", 5, "slow"] } })
+    expect(metadata.tags).toEqual(["skip-run-all", "slow"])
   })
 })
 
@@ -309,6 +415,30 @@ describe("toNbformatOutput", () => {
     expect(output).toEqual({
       output_type: "display_data",
       data: { "image/png": "base64data" },
+      metadata: {},
+    })
+  })
+
+  test("round-trips requested image width/height into mime-keyed metadata", () => {
+    const output = toNbformatOutput({
+      kind: "image",
+      mime: "image/png",
+      data: "base64data",
+      width: 200,
+      height: 100,
+    })
+    expect(output).toEqual({
+      output_type: "display_data",
+      data: { "image/png": "base64data" },
+      metadata: { "image/png": { width: 200, height: 100 } },
+    })
+  })
+
+  test("renders a markdown output as display_data with text/markdown data", () => {
+    const output = toNbformatOutput({ kind: "markdown", content: "**bold**" })
+    expect(output).toEqual({
+      output_type: "display_data",
+      data: { "text/markdown": ["**bold**"] },
       metadata: {},
     })
   })

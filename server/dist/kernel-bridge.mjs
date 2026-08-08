@@ -11,13 +11,45 @@
  */
 import { Dealer, Subscriber } from "zeromq"
 import { randomUUID } from "node:crypto"
-import { writeFileSync, mkdtempSync, rmSync } from "node:fs"
+import { writeFileSync, mkdtempSync, rmSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, dirname } from "node:path"
 import { spawn } from "node:child_process"
 import net from "node:net"
 import readline from "node:readline"
 import { buildMessage, parseFrames } from "./wire-protocol.mjs"
+
+/**
+ * `spawn("jupyter", ...)` resolves against whatever's first on this
+ * process's PATH, with no regard for which project the notebook actually
+ * belongs to - a global/system jupyter picked up that way can register a
+ * completely different "python3" kernelspec (different interpreter,
+ * different installed packages) than the project's own virtualenv, which is
+ * what actually executes notebook code. Preferring a project-local venv's
+ * own `jupyter`, found by walking up from the notebook's directory, keeps
+ * kernel resolution in sync with the environment the user actually meant.
+ * Falls back to bare "jupyter" (plain PATH lookup) if none is found.
+ */
+function resolveJupyterCommand(startDir) {
+  if (!startDir) return "jupyter"
+
+  const venvDirNames = [".venv", "venv", "env", ".env"]
+  const binSubdir = process.platform === "win32" ? "Scripts" : "bin"
+  const exeName = process.platform === "win32" ? "jupyter.exe" : "jupyter"
+
+  let dir = startDir
+  for (let depth = 0; depth < 6; depth++) {
+    for (const venvDirName of venvDirNames) {
+      const candidate = join(dir, venvDirName, binSubdir, exeName)
+      if (existsSync(candidate)) return candidate
+    }
+    const parent = dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+
+  return "jupyter"
+}
 
 function emit(obj) {
   process.stdout.write(JSON.stringify(obj) + "\n")
@@ -34,14 +66,15 @@ function getFreePort() {
   })
 }
 
-async function findKernelSpec(kernelName) {
+async function findKernelSpec(kernelName, cwd) {
+  const jupyterCommand = resolveJupyterCommand(cwd)
   const specs = await new Promise((resolve, reject) => {
-    const kernelspecProcess = spawn("jupyter", ["kernelspec", "list", "--json"])
+    const kernelspecProcess = spawn(jupyterCommand, ["kernelspec", "list", "--json"])
     let out = ""
     kernelspecProcess.stdout.on("data", (chunk) => (out += chunk))
     kernelspecProcess.on("error", reject)
     kernelspecProcess.on("close", (code) => {
-      if (code !== 0) return reject(new Error("jupyter kernelspec list failed"))
+      if (code !== 0) return reject(new Error(`\`${jupyterCommand} kernelspec list\` failed`))
       try {
         resolve(JSON.parse(out).kernelspecs || {})
       } catch (error) {
@@ -63,9 +96,17 @@ const SESSION = randomUUID()
 
 let shell = null
 let iopub = null
+let stdin = null
 let kernelProcess = null
 let connectionDir = null
 let kernelStderr = ""
+/**
+ * The header of the input_request currently awaiting a reply on the stdin
+ * channel - ipykernel blocks the whole shell channel on input(), so only
+ * one can ever be outstanding. input_reply must echo it back as its own
+ * parent_header for the kernel to match the reply to the right request.
+ */
+let pendingInputHeader = null
 
 /**
  * The connection file holds the HMAC signing key in plaintext - without
@@ -125,7 +166,7 @@ async function start(kernelName, cwd) {
   const connFile = join(connectionDir, "connection.json")
   writeFileSync(connFile, JSON.stringify(connInfo))
 
-  const kernelEntry = await findKernelSpec(kernelName)
+  const kernelEntry = await findKernelSpec(kernelName, cwd)
   const argv = kernelEntry.spec.argv.map((entry) =>
     entry
       .replace("{connection_file}", connFile)
@@ -148,9 +189,13 @@ async function start(kernelName, cwd) {
   iopub.connect(`tcp://127.0.0.1:${ports.iopub_port}`)
   iopub.subscribe()
 
+  stdin = new Dealer()
+  stdin.connect(`tcp://127.0.0.1:${ports.stdin_port}`)
+
   await waitForKernel()
   emit({ type: "ready" })
   listenIopub()
+  listenStdin()
 }
 
 /**
@@ -201,7 +246,7 @@ async function execute(id, code) {
       silent: false,
       store_history: true,
       user_expressions: {},
-      allow_stdin: false,
+      allow_stdin: true,
       stop_on_error: true,
     },
     id,
@@ -209,6 +254,51 @@ async function execute(id, code) {
     SESSION,
   )
   await shell.send(frames)
+}
+
+/**
+ * ipykernel's `input()`/`getpass()` block the shell channel and send an
+ * input_request over the (separate) stdin ROUTER/DEALER socket, waiting
+ * there for the matching input_reply before the cell's execution can
+ * continue - this listens for those requests and forwards them to the
+ * parent process (index.ts), which relays them to the browser popup.
+ */
+async function listenStdin() {
+  for await (const frames of stdin) {
+    try {
+      const msg = parseFrames(frames)
+
+      if (!msg || msg.header.msg_type !== "input_request") continue
+
+      pendingInputHeader = msg.header
+      emit({
+        type: "input_request",
+        parent_id: msg.parent_header.msg_id,
+        prompt: msg.content.prompt ?? "",
+        password: msg.content.password === true,
+      })
+    } catch (error) {
+      emit({
+        type: "error",
+        message: "failed to parse stdin message: " + String((error && error.stack) || error),
+      })
+    }
+  }
+}
+
+async function inputReply(value) {
+  if (!pendingInputHeader) return
+  const parentHeader = pendingInputHeader
+  pendingInputHeader = null
+  const frames = buildMessage(
+    "input_reply",
+    { value: String(value ?? ""), status: "ok" },
+    randomUUID(),
+    KEY,
+    SESSION,
+    parentHeader,
+  )
+  await stdin.send(frames)
 }
 
 /**
@@ -272,6 +362,7 @@ rl.on("line", async (line) => {
     if (msg.cmd === "start") await start(msg.kernel_name || "python3", msg.cwd)
     else if (msg.cmd === "execute") await execute(msg.id, msg.code)
     else if (msg.cmd === "interrupt") interrupt()
+    else if (msg.cmd === "input_reply") await inputReply(msg.value)
     else if (msg.cmd === "shutdown") {
       kernelProcess?.kill()
       cleanupConnectionDir()

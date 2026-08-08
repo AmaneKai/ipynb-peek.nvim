@@ -1,9 +1,25 @@
 export type CellOutput =
   | { kind: "text"; content: string; stream?: "stdout" | "stderr" }
   | { kind: "error"; content: string }
-  | { kind: "image"; data: string; mime?: "image/png" | "image/jpeg" | "image/svg+xml" }
+  | {
+      kind: "image"
+      data: string
+      mime?: "image/png" | "image/jpeg" | "image/svg+xml"
+      width?: number
+      height?: number
+    }
   | { kind: "html"; content: string }
   | { kind: "latex"; content: string }
+  | { kind: "markdown"; content: string }
+
+export type CellMetadata = {
+  source_hidden: boolean
+  outputs_hidden: boolean
+  editable: boolean
+  deletable: boolean
+  scrolled: boolean | "auto"
+  tags: string[]
+}
 
 export type RenderedCell = {
   index: number
@@ -18,6 +34,7 @@ export type RenderedCell = {
   outputs: CellOutput[]
   /** Exact nbformat/iopub objects retained for lossless persistence. */
   nbformat_outputs?: any[]
+  metadata?: CellMetadata
 }
 
 export function joinSource(src: string | string[] | undefined): string {
@@ -30,14 +47,54 @@ export function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;]*m/g, "")
 }
 
+/**
+ * A lone `\r` moves the terminal cursor back to the start of the current
+ * line rather than starting a new one - real Jupyter frontends re-render
+ * that line in place (this is how tqdm-style progress bars stay a single
+ * line instead of stacking). `text/plain` HTML rendering has no such
+ * cursor concept, so this collapses each `\r`-separated segment down to
+ * its last write before the text ever reaches the DOM. A trailing `\r`
+ * immediately before `\n` is a `\r\n` line ending, not an overwrite, so
+ * it's stripped rather than treated as "erase this line".
+ */
+export function applyCarriageReturns(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      if (!line.includes("\r")) return line
+      const trimmed = line.endsWith("\r") ? line.slice(0, -1) : line
+      const index = trimmed.lastIndexOf("\r")
+      return index === -1 ? trimmed : trimmed.slice(index + 1)
+    })
+    .join("\n")
+}
+
+/** Reads the `metadata[mime].width/height` nbformat convention used by display_data/execute_result for images. */
+export function imageSize(output: any, mime: string): { width?: number; height?: number } {
+  const meta = output.metadata?.[mime]
+  const width = typeof meta?.width === "number" ? meta.width : undefined
+  const height = typeof meta?.height === "number" ? meta.height : undefined
+  return { width, height }
+}
+
 export function renderOutput(output: any): CellOutput | null {
   const data = output.data ?? {}
 
   if (data["image/png"])
-    return { kind: "image", mime: "image/png", data: joinSource(data["image/png"]) }
+    return {
+      kind: "image",
+      mime: "image/png",
+      data: joinSource(data["image/png"]),
+      ...imageSize(output, "image/png"),
+    }
 
   if (data["image/jpeg"])
-    return { kind: "image", mime: "image/jpeg", data: joinSource(data["image/jpeg"]) }
+    return {
+      kind: "image",
+      mime: "image/jpeg",
+      data: joinSource(data["image/jpeg"]),
+      ...imageSize(output, "image/jpeg"),
+    }
 
   if (data["image/svg+xml"])
     return { kind: "image", mime: "image/svg+xml", data: joinSource(data["image/svg+xml"]) }
@@ -45,6 +102,8 @@ export function renderOutput(output: any): CellOutput | null {
   if (data["text/html"]) return { kind: "html", content: joinSource(data["text/html"]) }
 
   if (data["text/latex"]) return { kind: "latex", content: joinSource(data["text/latex"]) }
+
+  if (data["text/markdown"]) return { kind: "markdown", content: joinSource(data["text/markdown"]) }
 
   if (output.output_type === "stream")
     return {
@@ -84,11 +143,34 @@ export function appendOutput(outputs: CellOutput[], newOutput: CellOutput): void
     last.stream !== undefined &&
     last.stream === newOutput.stream
   ) {
-    last.content += newOutput.content
+    last.content = applyCarriageReturns(last.content + newOutput.content)
     return
   }
 
-  outputs.push(newOutput)
+  outputs.push(
+    newOutput.kind === "text"
+      ? { ...newOutput, content: applyCarriageReturns(newOutput.content) }
+      : newOutput,
+  )
+}
+
+/** Reads the standard nbformat cell-metadata conventions this preview respects. */
+export function readCellMetadata(cell: any): CellMetadata {
+  const jupyterMeta = cell.metadata?.jupyter ?? {}
+  const tags = Array.isArray(cell.metadata?.tags)
+    ? cell.metadata.tags.filter((tag: any) => typeof tag === "string")
+    : []
+  return {
+    source_hidden: jupyterMeta.source_hidden === true || cell.metadata?.hide_input === true,
+    outputs_hidden:
+      jupyterMeta.outputs_hidden === true ||
+      cell.metadata?.collapsed === true ||
+      tags.includes("hide-output"),
+    editable: cell.metadata?.editable !== false,
+    deletable: cell.metadata?.deletable !== false,
+    scrolled: cell.metadata?.scrolled === "auto" ? "auto" : cell.metadata?.scrolled === true,
+    tags,
+  }
 }
 
 export function renderNotebook(nb: any): RenderedCell[] {
@@ -120,6 +202,7 @@ export function renderNotebook(nb: any): RenderedCell[] {
         cell.cell_type === "code" && Array.isArray(cell.outputs)
           ? structuredClone(cell.outputs)
           : undefined,
+      metadata: readCellMetadata(cell),
     })
   }
 
@@ -165,7 +248,7 @@ export function mergeCells(previous: RenderedCell[], fresh: RenderedCell[]): Ren
  */
 export function syncCells(
   previous: RenderedCell[],
-  live: { cell_type: "code" | "markdown"; source: string }[],
+  live: { cell_type: "code" | "markdown" | "raw"; source: string }[],
 ): RenderedCell[] {
   // Exact source/type matches form stable anchors. Unmatched one-to-one gaps
   // between them are ordinary edits and keep identity positionally; unequal
@@ -252,12 +335,23 @@ export function toNbformatOutput(output: CellOutput): any {
       return { output_type: "display_data", data: { "text/html": [output.content] }, metadata: {} }
     case "latex":
       return { output_type: "display_data", data: { "text/latex": [output.content] }, metadata: {} }
-    case "image":
+    case "markdown":
       return {
         output_type: "display_data",
-        data: { [output.mime ?? "image/png"]: output.data },
+        data: { "text/markdown": [output.content] },
         metadata: {},
       }
+    case "image": {
+      const mime = output.mime ?? "image/png"
+      const size: Record<string, number> = {}
+      if (output.width) size.width = output.width
+      if (output.height) size.height = output.height
+      return {
+        output_type: "display_data",
+        data: { [mime]: output.data },
+        metadata: Object.keys(size).length ? { [mime]: size } : {},
+      }
+    }
     case "error":
       return {
         output_type: "error",

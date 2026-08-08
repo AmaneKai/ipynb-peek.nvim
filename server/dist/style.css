@@ -1,11 +1,31 @@
-:root { color-scheme: dark; }
-* { box-sizing: border-box; }
-html, body {
+:root {
+  color-scheme: dark;
+  /*
+   * Appended after every font stack's Latin-first faces (never as the sole
+   * fallback) so Japanese/Chinese glyphs render via a real CJK-capable face
+   * instead of falling through to tofu boxes in the browser's default
+   * generic font. Referenced by name only - these are system fonts, not
+   * downloaded, so this doesn't affect the page's CSP font-src.
+   */
+  --ipynb-cjk-fallback:
+    "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans CJK JP", "PingFang SC",
+    "Noto Sans CJK SC", "Microsoft YaHei", "Malgun Gothic";
+  --ipynb-cjk-mono-fallback:
+    "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans Mono CJK JP", "PingFang SC",
+    "Noto Sans Mono CJK SC", "Microsoft YaHei", "Malgun Gothic";
+}
+* {
+  box-sizing: border-box;
+}
+html,
+body {
   margin: 0;
   padding: 0;
   background: var(--ipynb-bg, #1e1e1e);
   color: var(--ipynb-fg, #d4d4d4);
-  font-family: var(--ipynb-font-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  font-family:
+    var(--ipynb-font-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"), var(--ipynb-cjk-fallback),
+    sans-serif;
 }
 #notebook {
   max-width: 860px;
@@ -53,7 +73,8 @@ html, body {
   font-size: 10px;
   color: var(--ipynb-dim, #5a5a5a);
   margin-bottom: 6px;
-  font-family: var(--ipynb-font-mono, "SF Mono", Menlo, Consolas, monospace);
+  font-family:
+    var(--ipynb-font-mono, "SF Mono", Menlo, Consolas), var(--ipynb-cjk-mono-fallback), monospace;
   user-select: none;
 }
 .add-cell-bar {
@@ -94,7 +115,8 @@ html, body {
   margin: 0;
 }
 .code-cell .code-box code {
-  font-family: var(--ipynb-font-mono, "SF Mono", Menlo, Consolas, monospace);
+  font-family:
+    var(--ipynb-font-mono, "SF Mono", Menlo, Consolas), var(--ipynb-cjk-mono-fallback), monospace;
   font-size: var(--ipynb-font-size-code, 13px);
   line-height: 1.5;
   background: transparent !important;
@@ -108,7 +130,8 @@ html, body {
   gap: 7px;
   font-size: 11px;
   color: var(--ipynb-muted, #6a6a6a);
-  font-family: var(--ipynb-font-mono, "SF Mono", Menlo, Consolas, monospace);
+  font-family:
+    var(--ipynb-font-mono, "SF Mono", Menlo, Consolas), var(--ipynb-cjk-mono-fallback), monospace;
   user-select: none;
 }
 .exec-count.busy {
@@ -128,6 +151,46 @@ html, body {
 .outputs {
   margin-top: 10px;
   padding: 0 2px;
+}
+.outputs.scrolled {
+  max-height: 24em;
+  overflow-y: auto;
+  border: 1px solid var(--ipynb-border, #3c3c3c);
+  border-radius: 4px;
+  padding: 6px 8px;
+}
+.hidden-bar {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: var(--ipynb-surface, #2d2d2d);
+  border: 1px dashed var(--ipynb-border, #3c3c3c);
+  border-radius: 4px;
+  color: var(--ipynb-muted, #6a6a6a);
+  font-size: 11px;
+  font-family: inherit;
+  padding: 4px 10px;
+  cursor: pointer;
+  margin: 4px 0;
+}
+.hidden-bar:hover {
+  color: var(--ipynb-fg, #cccccc);
+  border-color: var(--ipynb-accent, #007acc);
+}
+.cell-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 6px;
+}
+.tag-chip {
+  font-size: 10px;
+  color: var(--ipynb-muted, #6a6a6a);
+  background: var(--ipynb-surface, #2d2d2d);
+  border: 1px solid var(--ipynb-border, #3c3c3c);
+  border-radius: 10px;
+  padding: 1px 8px;
+  user-select: none;
 }
 .outputs img {
   max-width: 100%;
@@ -158,11 +221,55 @@ html, body {
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
   border-radius: 4px;
 }
+#stdin-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 900;
+  display: none;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: var(--ipynb-surface, #252526);
+  border-top: 1px solid var(--ipynb-accent, #007acc);
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.35);
+}
+#stdin-bar.open {
+  display: flex;
+}
+#stdin-prompt-text {
+  font-family:
+    var(--ipynb-font-mono, "SF Mono", Menlo, Consolas), var(--ipynb-cjk-mono-fallback), monospace;
+  font-size: 13px;
+  color: var(--ipynb-fg, #d4d4d4);
+  white-space: pre;
+}
+#stdin-input {
+  flex: 1;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--ipynb-fg, #d4d4d4);
+  background: var(--ipynb-bg, #1e1e1e);
+  border: 1px solid var(--ipynb-border, #3c3c3c);
+  border-radius: 4px;
+  padding: 5px 8px;
+}
+#stdin-send {
+  font-size: 12px;
+  color: #fff;
+  background: var(--ipynb-accent, #007acc);
+  border: none;
+  border-radius: 4px;
+  padding: 6px 14px;
+  cursor: pointer;
+}
 .outputs pre {
   margin: 4px 0;
   white-space: pre-wrap;
   word-break: break-word;
-  font-family: var(--ipynb-font-mono, "SF Mono", Menlo, Consolas, monospace);
+  font-family:
+    var(--ipynb-font-mono, "SF Mono", Menlo, Consolas), var(--ipynb-cjk-mono-fallback), monospace;
   font-size: var(--ipynb-font-size-code, 13px);
   color: var(--ipynb-fg, #cccccc);
 }
@@ -181,7 +288,8 @@ html, body {
 .outputs .table-scroll {
   overflow-x: auto;
 }
-.outputs td, .outputs th {
+.outputs td,
+.outputs th {
   border: 1px solid var(--ipynb-border, #3c3c3c);
   padding: 4px 10px;
 }
@@ -189,16 +297,31 @@ html, body {
   font-size: var(--ipynb-font-size-md, 15px);
   line-height: 1.7;
 }
-.md-cell h1, .md-cell h2, .md-cell h3, .md-cell h4 { color: var(--ipynb-heading, #e8e8e8); margin: 1.4em 0 0.5em; }
-.md-cell h1 { font-size: 1.8em; }
-.md-cell h2 { font-size: 1.5em; }
-.md-cell h3 { font-size: 1.25em; }
-.md-cell p { margin: 0.9em 0; }
+.md-cell h1,
+.md-cell h2,
+.md-cell h3,
+.md-cell h4 {
+  color: var(--ipynb-heading, #e8e8e8);
+  margin: 1.4em 0 0.5em;
+}
+.md-cell h1 {
+  font-size: 1.8em;
+}
+.md-cell h2 {
+  font-size: 1.5em;
+}
+.md-cell h3 {
+  font-size: 1.25em;
+}
+.md-cell p {
+  margin: 0.9em 0;
+}
 .md-cell code {
   background: var(--ipynb-surface, #2d2d2d);
   padding: 1px 5px;
   border-radius: 3px;
-  font-family: var(--ipynb-font-mono, "SF Mono", Menlo, Consolas, monospace);
+  font-family:
+    var(--ipynb-font-mono, "SF Mono", Menlo, Consolas), var(--ipynb-cjk-mono-fallback), monospace;
   font-size: 0.9em;
 }
 .md-cell pre code {
@@ -206,7 +329,8 @@ html, body {
   padding: 10px;
 }
 .raw-cell pre {
-  font-family: var(--ipynb-font-mono, "SF Mono", Menlo, Consolas, monospace);
+  font-family:
+    var(--ipynb-font-mono, "SF Mono", Menlo, Consolas), var(--ipynb-cjk-mono-fallback), monospace;
   font-size: var(--ipynb-font-size-code, 13px);
   color: var(--ipynb-muted, #a0a0a0);
   white-space: pre-wrap;

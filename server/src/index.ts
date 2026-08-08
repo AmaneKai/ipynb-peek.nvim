@@ -267,7 +267,18 @@ function startBridge(kernelName: string) {
           if (currentCells[index]?.status === "idle") void persistOutputsToDisk()
         },
       )
-    else if (bridgeMessage.type === "error") {
+    else if (bridgeMessage.type === "input_request") {
+      const pending = pendingExecs.get(bridgeMessage.parent_id)
+      const index = pending ? pendingCellIndex(pending) : null
+      broadcast(
+        JSON.stringify({
+          type: "input_request",
+          index,
+          prompt: String(bridgeMessage.prompt ?? ""),
+          password: bridgeMessage.password === true,
+        }),
+      )
+    } else if (bridgeMessage.type === "error") {
       const message = String(bridgeMessage.message ?? "kernel bridge error")
       if (bridgeMessage.operation === "start") failBridge(proc, message)
       else if (bridgeMessage.operation === "execute" && bridgeMessage.id) {
@@ -549,6 +560,14 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
     broadcastFull()
     return sendJson(res, 200, { ok: true })
+  }
+
+  if (url.pathname === "/input" && req.method === "POST") {
+    if (!bridgeProc) return sendJson(res, 409, { ok: false, error: "no running kernel" })
+    return handleJsonRoute(res, async () => {
+      const body: any = JSON.parse(await readBody(req))
+      writeToBridge({ cmd: "input_reply", value: String(body.value ?? "") })
+    })
   }
 
   if (url.pathname === "/interrupt" && req.method === "POST") {
