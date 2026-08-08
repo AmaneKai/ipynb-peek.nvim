@@ -140,6 +140,20 @@ body {
 .timing {
   color: var(--ipynb-muted, #6a6a6a);
 }
+.interrupt-btn {
+  font-size: 9px;
+  line-height: 1;
+  color: var(--ipynb-danger, #c74e39);
+  background: transparent;
+  border: 1px solid var(--ipynb-danger, #c74e39);
+  border-radius: 3px;
+  padding: 2px 5px;
+  cursor: pointer;
+}
+.interrupt-btn:hover {
+  color: #fff;
+  background: var(--ipynb-danger, #c74e39);
+}
 .lang-label {
   position: absolute;
   right: 12px;
