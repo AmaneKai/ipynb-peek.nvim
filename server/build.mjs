@@ -37,6 +37,19 @@ await esbuild.build({
   format: "esm",
   minify: true,
   outfile: "dist/client.js",
+  // Preserve this dynamic import as a browser request; math-renderer.js is
+  // bundled separately below so the much larger KaTeX parser stays out of
+  // the startup bundle without introducing hash-named shared chunks.
+  external: ["./math-renderer.js"],
+})
+
+await esbuild.build({
+  entryPoints: ["src/math-renderer.js"],
+  bundle: true,
+  platform: "browser",
+  format: "esm",
+  minify: true,
+  outfile: "dist/math-renderer.js",
 })
 
 for (const file of ["kernel-bridge.mjs", "wire-protocol.mjs", "index.html", "style.css"]) {

@@ -92,30 +92,28 @@ end
 --- like "../data/foo.csv" resolve correctly) and the notebook's own full
 --- path (so the server can write execution results back into the real
 --- .ipynb file - see persistOutputsToDisk on the server side).
-local function schedule_render(bufnr)
-  if not server.ready then
-    return
-  end
-  local content = current_content(bufnr)
-  if not content then
-    return
-  end
-  local path = vim.api.nvim_buf_get_name(bufnr)
-  local dir = vim.fn.fnamemodify(path, ":h")
-  local headers = { "X-Notebook-Dir: " .. dir, "X-Notebook-Path: " .. path }
-  client.debounced_request(
-    "render",
-    server.port,
-    "/render",
-    content,
-    headers,
-    M.config.debounce_ms,
-    function(decoded)
+local function schedule_render(bufnr, delay)
+  client.debounce("render", delay == nil and M.config.debounce_ms or delay, function()
+    if
+      not server.ready
+      or active_bufnr ~= bufnr
+      or not vim.api.nvim_buf_is_valid(bufnr)
+    then
+      return
+    end
+    local content = current_content(bufnr)
+    if not content then
+      return
+    end
+    local path = vim.api.nvim_buf_get_name(bufnr)
+    local dir = vim.fn.fnamemodify(path, ":h")
+    local headers = { "X-Notebook-Dir: " .. dir, "X-Notebook-Path: " .. path }
+    client.request(server.port, "/render", content, headers, function(decoded)
       if not decoded.ok then
         vim.notify("[ipynb-peek] render error: " .. tostring(decoded.error), vim.log.levels.ERROR)
       end
-    end
-  )
+    end)
+  end)
 end
 
 --- External file-change detection: watches the notebook's *directory*, not
@@ -207,30 +205,34 @@ end
 --- source changes, so this only ever affects rendered source text, never
 --- clears a cell's last output mid-edit.
 local function schedule_sync(bufnr)
-  if not server.ready then
-    return
-  end
-  local parsed = cells.parse(bufnr)
-  local live_cells = {}
-  for _, cell in ipairs(parsed) do
-    table.insert(live_cells, {
-      cell_type = cell.cell_type,
-      source = cells.display_source(bufnr, cell),
-    })
-  end
-  client.debounced_request(
-    "sync",
-    server.port,
-    "/sync",
-    vim.json.encode({ cells = live_cells }),
-    nil,
-    M.config.sync_debounce_ms,
-    function(decoded)
-      if not decoded.ok then
-        vim.notify("[ipynb-peek] sync error: " .. tostring(decoded.error), vim.log.levels.ERROR)
-      end
+  client.debounce("sync", M.config.sync_debounce_ms, function()
+    if
+      not server.ready
+      or active_bufnr ~= bufnr
+      or not vim.api.nvim_buf_is_valid(bufnr)
+    then
+      return
     end
-  )
+    local parsed, lines = cells.snapshot(bufnr)
+    local live_cells = {}
+    for _, cell in ipairs(parsed) do
+      table.insert(live_cells, {
+        cell_type = cell.cell_type,
+        source = cells.display_source_from_lines(lines, cell),
+      })
+    end
+    client.request(
+      server.port,
+      "/sync",
+      vim.json.encode({ cells = live_cells }),
+      nil,
+      function(decoded)
+        if not decoded.ok then
+          vim.notify("[ipynb-peek] sync error: " .. tostring(decoded.error), vim.log.levels.ERROR)
+        end
+      end
+    )
+  end)
 end
 
 --- True (after warning) if cells.parse() found zero `# %%` markers in what's
@@ -295,7 +297,7 @@ function M.run_cell(advance)
   end
   local bufnr = vim.api.nvim_get_current_buf()
   local line = vim.api.nvim_win_get_cursor(0)[1]
-  local parsed = cells.parse(bufnr)
+  local parsed, lines = cells.snapshot(bufnr)
   if warn_if_unparseable(parsed) then
     return
   end
@@ -308,7 +310,7 @@ function M.run_cell(advance)
     vim.notify("[ipynb-peek] current cell is not a code cell", vim.log.levels.WARN)
     return
   end
-  local source = cells.source(bufnr, cell)
+  local source = cells.source_from_lines(lines, cell)
   client.request(
     server.port,
     "/execute",
@@ -502,7 +504,7 @@ function M.run_all()
     return
   end
   local bufnr = vim.api.nvim_get_current_buf()
-  local parsed = cells.parse(bufnr)
+  local parsed, lines = cells.snapshot(bufnr)
   if warn_if_unparseable(parsed) then
     return
   end
@@ -510,7 +512,10 @@ function M.run_all()
   local code_cells = {}
   for position, cell in ipairs(parsed) do
     if cell.cell_type == "code" and not vim.tbl_contains(cell.tags or {}, "skip-run-all") then
-      table.insert(code_cells, { index = position - 1, source = cells.source(bufnr, cell) })
+      table.insert(code_cells, {
+        index = position - 1,
+        source = cells.source_from_lines(lines, cell),
+      })
     end
   end
 
@@ -697,11 +702,11 @@ local status_ns = vim.api.nvim_create_namespace("ipynb-peek-status")
 --- cells_status event that clears and reapplies everything, so a stale
 --- single-cell update self-heals quickly, same shape as the busy-status
 --- reconciliation already done server-side.
-local function apply_cell_status(bufnr, status_info)
+local function apply_cell_status(bufnr, status_info, parsed)
   if not M.config.inline_status then
     return
   end
-  local parsed = cells.parse(bufnr)
+  parsed = parsed or cells.parse(bufnr)
   local cell = parsed[status_info.index + 1]
   if not cell then
     return
@@ -729,8 +734,9 @@ local function apply_cells_status(bufnr, cells_status)
     return
   end
   vim.api.nvim_buf_clear_namespace(bufnr, status_ns, 0, -1)
+  local parsed = cells.parse(bufnr)
   for _, status_info in ipairs(cells_status) do
-    apply_cell_status(bufnr, status_info)
+    apply_cell_status(bufnr, status_info, parsed)
   end
 end
 
@@ -965,25 +971,29 @@ function M.open()
   local last_cursor_index = nil
 
   local function send_cursor_update()
-    if not server.ready then
-      return
-    end
-    local line = vim.api.nvim_win_get_cursor(0)[1]
-    local parsed = cells.parse(bufnr)
-    local index = cells.cell_index_at(parsed, line)
-    if index == nil or index == last_cursor_index then
-      return
-    end
-    last_cursor_index = index
-    client.debounced_request(
-      "cursor",
-      server.port,
-      "/cursor",
-      vim.json.encode({ index = index }),
-      nil,
-      M.config.cursor_debounce_ms,
-      function() end
-    )
+    client.debounce("cursor", M.config.cursor_debounce_ms, function()
+      if
+        not server.ready
+        or active_bufnr ~= bufnr
+        or vim.api.nvim_get_current_buf() ~= bufnr
+      then
+        return
+      end
+      local line = vim.api.nvim_win_get_cursor(0)[1]
+      local parsed = cells.parse(bufnr)
+      local index = cells.cell_index_at(parsed, line)
+      if index == nil or index == last_cursor_index then
+        return
+      end
+      last_cursor_index = index
+      client.request(
+        server.port,
+        "/cursor",
+        vim.json.encode({ index = index }),
+        nil,
+        function() end
+      )
+    end)
   end
 
   vim.api.nvim_create_autocmd({ "BufWritePost", "BufEnter" }, {
@@ -1051,7 +1061,9 @@ function M.open()
       browser.open(server.url, M.config.window, M.config.position)
       start_event_listener(bufnr)
       warn_if_unparseable(cells.parse(bufnr))
-      schedule_render(bufnr)
+      -- No save/typing burst exists during initial open, so do not spend the
+      -- normal render debounce interval showing an empty popup.
+      schedule_render(bufnr, 0)
       return
     end
     if server.error or uv.now() - started_at >= M.config.startup_timeout_ms then
@@ -1079,6 +1091,7 @@ function M.close()
   if active_bufnr and vim.api.nvim_buf_is_valid(active_bufnr) then
     vim.api.nvim_buf_clear_namespace(active_bufnr, status_ns, 0, -1)
   end
+  cells.invalidate(active_bufnr)
   active_bufnr = nil
 end
 

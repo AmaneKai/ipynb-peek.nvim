@@ -1,5 +1,17 @@
 local M = {}
 
+--- The same buffer version is commonly inspected several times in one UI
+--- event: parse the cell boundaries, then extract every cell's source, then
+--- apply a status snapshot. Keep one immutable snapshot for the most recently
+--- inspected buffer so those operations share a single nvim_buf_get_lines()
+--- call. changedtick invalidates it automatically on the next real edit;
+--- extmark/status updates do not change changedtick, so they can safely reuse
+--- the parsed boundaries too.
+local cached_bufnr = nil
+local cached_changedtick = nil
+local cached_cells = nil
+local cached_lines = nil
+
 --- Extracts a jupytext percent-format marker line's `tags=[...]` metadata
 --- (e.g. `# %% tags=["skip-run-all"]`), if present. Only `tags` is parsed -
 --- jupytext's marker-line metadata syntax supports arbitrary key/value
@@ -30,12 +42,7 @@ local function parse_bool_attr(line, name)
   return line:match(name .. "%s*=%s*false") == nil
 end
 
---- Parses a jupytext "light" format buffer (`# %%`-delimited) into cells.
---- Returns an array of { start_line, end_line, cell_type, tags, editable,
---- deletable }, both 1-indexed and inclusive, where start_line is the
---- marker line itself.
-function M.parse(bufnr)
-  local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+local function parse_lines(lines)
   local parsed = {}
   local current = nil
 
@@ -65,6 +72,46 @@ function M.parse(bufnr)
     table.insert(parsed, current)
   end
 
+  return parsed
+end
+
+--- Returns both the parsed cells and the exact buffer lines they were parsed
+--- from. Callers rebuilding source for several cells should use this once and
+--- pass `lines` to source_from_lines/display_source_from_lines instead of
+--- crossing the Neovim API once per cell.
+function M.snapshot(bufnr)
+  local changedtick = vim.api.nvim_buf_get_changedtick(bufnr)
+  if bufnr == cached_bufnr and changedtick == cached_changedtick then
+    return cached_cells, cached_lines
+  end
+
+  local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+  local parsed = parse_lines(lines)
+  cached_bufnr = bufnr
+  cached_changedtick = changedtick
+  cached_cells = parsed
+  cached_lines = lines
+  return parsed, lines
+end
+
+--- Releases the retained source snapshot once its notebook closes. Passing no
+--- buffer clears it unconditionally; passing a different buffer is a no-op.
+function M.invalidate(bufnr)
+  if bufnr ~= nil and bufnr ~= cached_bufnr then
+    return
+  end
+  cached_bufnr = nil
+  cached_changedtick = nil
+  cached_cells = nil
+  cached_lines = nil
+end
+
+--- Parses a jupytext "light" format buffer (`# %%`-delimited) into cells.
+--- Returns an array of { start_line, end_line, cell_type, tags, editable,
+--- deletable }, both 1-indexed and inclusive, where start_line is the
+--- marker line itself.
+function M.parse(bufnr)
+  local parsed = M.snapshot(bufnr)
   return parsed
 end
 
@@ -121,15 +168,30 @@ local function uncomment_magic_line(line)
   return line
 end
 
---- Extracts a cell's body source, excluding the `# %%` marker line itself.
-function M.source(bufnr, cell)
-  local lines = vim.api.nvim_buf_get_lines(bufnr, cell.start_line, cell.end_line, false)
+local function cell_body(lines, cell)
+  local body = {}
+  for line_number = cell.start_line + 1, cell.end_line do
+    table.insert(body, lines[line_number])
+  end
+  return body
+end
+
+--- Extracts a cell's body source from an existing snapshot, excluding the
+--- `# %%` marker line itself.
+function M.source_from_lines(lines, cell)
+  local body = cell_body(lines, cell)
   if cell.cell_type == "code" then
-    for line_number, line in ipairs(lines) do
-      lines[line_number] = uncomment_magic_line(line)
+    for line_number, line in ipairs(body) do
+      body[line_number] = uncomment_magic_line(line)
     end
   end
-  return table.concat(lines, "\n")
+  return table.concat(body, "\n")
+end
+
+--- Extracts a cell's body source, excluding the `# %%` marker line itself.
+function M.source(bufnr, cell)
+  local _, lines = M.snapshot(bufnr)
+  return M.source_from_lines(lines, cell)
 end
 
 --- Same as source(), but for markdown and raw cells also strips jupytext's
@@ -137,15 +199,20 @@ end
 --- file stays valid Python; it strips this back out when converting to
 --- .ipynb JSON on save - live-sync reads the raw buffer before that
 --- conversion ever happens, so we have to undo it ourselves here).
-function M.display_source(bufnr, cell)
+function M.display_source_from_lines(lines, cell)
   if cell.cell_type ~= "markdown" and cell.cell_type ~= "raw" then
-    return M.source(bufnr, cell)
+    return M.source_from_lines(lines, cell)
   end
-  local lines = vim.api.nvim_buf_get_lines(bufnr, cell.start_line, cell.end_line, false)
-  for line_number, line in ipairs(lines) do
-    lines[line_number] = (line:gsub("^# ?", "", 1))
+  local body = cell_body(lines, cell)
+  for line_number, line in ipairs(body) do
+    body[line_number] = (line:gsub("^# ?", "", 1))
   end
-  return table.concat(lines, "\n")
+  return table.concat(body, "\n")
+end
+
+function M.display_source(bufnr, cell)
+  local _, lines = M.snapshot(bufnr)
+  return M.display_source_from_lines(lines, cell)
 end
 
 return M

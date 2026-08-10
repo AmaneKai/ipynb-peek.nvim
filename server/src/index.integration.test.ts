@@ -63,11 +63,13 @@ describe("GET /", () => {
   })
 })
 
-describe("GET /client.js and /style.css", () => {
+describe("GET frontend assets", () => {
   test("serve the extracted client assets", async () => {
     const script = await fetch(`${baseUrl}/client.js`)
+    const mathRenderer = await fetch(`${baseUrl}/math-renderer.js`)
     const style = await fetch(`${baseUrl}/style.css`)
     expect(script.status).toBe(200)
+    expect(mathRenderer.status).toBe(200)
     expect(style.status).toBe(200)
   })
 })

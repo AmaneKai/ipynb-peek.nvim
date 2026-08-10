@@ -2,11 +2,28 @@ import { AnsiUp } from "ansi_up"
 import DOMPurify from "dompurify"
 import hljs from "highlight.js/lib/core"
 import python from "highlight.js/lib/languages/python"
-import renderMathInElement from "katex/contrib/auto-render"
 import { marked } from "marked"
 
 const ansiUp = new AnsiUp()
 hljs.registerLanguage("python", python)
+
+let mathRendererPromise
+
+/**
+ * KaTeX accounts for most of the frontend bundle but most notebook cells do
+ * not contain math. Keep it in a separate browser module and only fetch/parse
+ * it after a cell actually contains a supported delimiter.
+ */
+function loadMathRenderer() {
+  if (!mathRendererPromise) {
+    const stylesheet = document.createElement("link")
+    stylesheet.rel = "stylesheet"
+    stylesheet.href = "/katex.min.css"
+    document.head.appendChild(stylesheet)
+    mathRendererPromise = import("./math-renderer.js").then((module) => module.renderMathInElement)
+  }
+  return mathRendererPromise
+}
 
 ;(function () {
   /**
@@ -19,7 +36,22 @@ hljs.registerLanguage("python", python)
   const container = document.getElementById("notebook")
   const sessionToken = document.querySelector('meta[name="ipynb-peek-token"]')?.content || ""
   const cellEls = []
-  const cellTimers = []
+  const highlightObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue
+        highlightObserver.unobserve(entry.target)
+        try {
+          hljs.highlightElement(entry.target)
+        } catch (error) {
+          console.error("[ipynb-peek] syntax highlighting failed:", error)
+        }
+      }
+    },
+    // Highlight just before a cell scrolls into view so users normally never
+    // see the unhighlighted intermediate state.
+    { rootMargin: "600px 0px" },
+  )
   // Cells whose source/outputs the user has manually revealed past what
   // source_hidden/outputs_hidden metadata says to hide by default - kept
   // keyed by index across re-renders so a toggle survives live-typing
@@ -96,25 +128,48 @@ hljs.registerLanguage("python", python)
    * Jupyter's own markdown-it + katex renderer is ordered.
    */
   function renderMath(container) {
-    try {
-      renderMathInElement(container, {
-        delimiters: [
-          { left: "$$", right: "$$", display: true },
-          { left: "$", right: "$", display: false },
-          { left: "\\(", right: "\\)", display: false },
-          { left: "\\[", right: "\\]", display: true },
-        ],
-        throwOnError: false,
+    const text = container.textContent || ""
+    if (!text.includes("$") && !text.includes("\\(") && !text.includes("\\[")) return
+
+    loadMathRenderer()
+      .then((renderMathInElement) => {
+        // A rapid live-sync may have replaced this cell while the lazy module
+        // was loading. Rendering a detached old node only wastes work.
+        if (!container.isConnected) return
+        renderMathInElement(container, {
+          delimiters: [
+            { left: "$$", right: "$$", display: true },
+            { left: "$", right: "$", display: false },
+            { left: "\\(", right: "\\)", display: false },
+            { left: "\\[", right: "\\]", display: true },
+          ],
+          throwOnError: false,
+        })
       })
-    } catch (error) {
-      console.error("[ipynb-peek] LaTeX rendering failed:", error)
-    }
+      .catch((error) => console.error("[ipynb-peek] LaTeX rendering failed:", error))
+  }
+
+  const busyCellTicks = new Map()
+  let busyCellsTimer = null
+
+  function ensureBusyCellsTimer() {
+    if (busyCellsTimer || busyCellTicks.size === 0) return
+    busyCellsTimer = setInterval(() => {
+      for (const tick of busyCellTicks.values()) tick()
+    }, 100)
   }
 
   function clearCellTimer(index) {
-    if (!cellTimers[index]) return
-    clearInterval(cellTimers[index])
-    cellTimers[index] = null
+    busyCellTicks.delete(index)
+    if (busyCellTicks.size === 0 && busyCellsTimer) {
+      clearInterval(busyCellsTimer)
+      busyCellsTimer = null
+    }
+  }
+
+  function setCellTimer(index, tick) {
+    busyCellTicks.set(index, tick)
+    ensureBusyCellsTimer()
   }
 
   function formatSeconds(milliseconds) {
@@ -284,7 +339,7 @@ hljs.registerLanguage("python", python)
           timing.textContent = formatSeconds(Date.now() - (cell.started_at || Date.now()))
         }
         tick()
-        if (cell.status === "busy") cellTimers[index] = setInterval(tick, 100)
+        if (cell.status === "busy") setCellTimer(index, tick)
 
         box.appendChild(statusBar)
 
@@ -295,11 +350,7 @@ hljs.registerLanguage("python", python)
 
         el.appendChild(box)
 
-        try {
-          hljs.highlightElement(code)
-        } catch (error) {
-          console.error("[ipynb-peek] syntax highlighting failed:", error)
-        }
+        highlightObserver.observe(code)
       }
 
       if (cell.outputs && cell.outputs.length) {
@@ -358,22 +409,27 @@ hljs.registerLanguage("python", python)
 
   function fullRender(cells) {
     closeStdinPrompt()
-    for (let position = 0; position < cellTimers.length; position++) clearCellTimer(position)
-    container.innerHTML = ""
+    highlightObserver.disconnect()
+    for (const index of [...busyCellTicks.keys()]) clearCellTimer(index)
     cellEls.length = 0
-    cellTimers.length = 0
-    container.appendChild(renderAddBar(-1))
+    const fragment = document.createDocumentFragment()
+    fragment.appendChild(renderAddBar(-1))
     cells.forEach((cell, index) => {
       const el = renderCell(cell, index)
       cellEls.push(el)
-      container.appendChild(el)
-      container.appendChild(renderAddBar(index))
+      fragment.appendChild(el)
+      fragment.appendChild(renderAddBar(index))
     })
+    // Commit the completed tree once. Appending each cell to the live DOM can
+    // trigger repeated style/layout work on large notebooks during startup.
+    container.replaceChildren(fragment)
   }
 
   function updateCell(index, cell) {
     const old = cellEls[index]
     if (!old) return
+    const oldCode = old.querySelector(".code-box code")
+    if (oldCode) highlightObserver.unobserve(oldCode)
     clearCellTimer(index)
     const el = renderCell(cell, index)
     if (old.classList.contains("active-cell")) el.classList.add("active-cell")

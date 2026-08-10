@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { extname } from "node:path"
 import readline from "node:readline"
+import { randomBytes } from "node:crypto"
 import { WebSocketServer, WebSocket } from "ws"
 import {
   renderNotebook,
@@ -33,17 +34,17 @@ let notebookPath: string | undefined
 let wsClients = new Set<WebSocket>()
 
 /**
- * Reassigned at the top of each createServer() call, from
- * IPYNB_PEEK_TOKEN (set once by lua/ipynb-peek/server.lua when it spawns
- * this server, a fresh random value per session). Guards every
+ * Reassigned at the top of each createServer() call. The CLI entry point
+ * generates a fresh value inside this process; tests can pass one explicitly.
+ * Guards every
  * state-changing route and the /ws upgrade against any other page the
  * user happens to have open in the same browser: without this, that page
  * could POST to /execute (or open its own /ws) and run arbitrary code in
  * the user's kernel purely by knowing/scanning the port - binding to
  * 127.0.0.1 alone doesn't stop same-machine, cross-origin requests. Left
- * unset (undefined) when the server is started directly - e.g. by the
- * integration tests below, or a maintainer running `npm start` by hand -
- * so auth is opt-in for those cases rather than a hard requirement.
+ * unset (undefined) only when createServer() is called directly without a
+ * token (as some integration tests do), so that programmatic API stays
+ * convenient without weakening the real CLI path.
  */
 let authToken: string | undefined
 
@@ -460,6 +461,9 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
   if (url.pathname === "/client.js")
     return serveAsset(res, "client.js", "text/javascript; charset=utf-8")
 
+  if (url.pathname === "/math-renderer.js")
+    return serveAsset(res, "math-renderer.js", "text/javascript; charset=utf-8")
+
   if (url.pathname === "/health") {
     res.writeHead(200, { "content-type": "text/plain" })
     return res.end("ok")
@@ -504,6 +508,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
   if (url.pathname === "/render" && req.method === "POST") {
     return handleJsonRoute(res, async () => {
+      const hadExistingServerState = currentCells.length > 0
       const dirHeader = req.headers["x-notebook-dir"]
       if (typeof dirHeader === "string") notebookDir = dirHeader
       const pathHeader = req.headers["x-notebook-path"]
@@ -514,7 +519,12 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       currentCells = mergeCells(currentCells, renderNotebook(nb))
       reconcileBusyStatus(currentCells, pendingExecs)
       broadcastFull()
-      await persistOutputsToDisk()
+      // The first render came directly from this same notebook file, so
+      // immediately cloning, rereading, rewriting and renaming it cannot add
+      // any state. Later renders may need to restore execution results that a
+      // concurrent jupytext save omitted, so retain the existing behavior once
+      // the server has actually held notebook state.
+      if (hadExistingServerState) await persistOutputsToDisk()
     })
   }
 
@@ -736,7 +746,12 @@ export function createServer(
 }
 
 if (import.meta.main) {
-  const server = await createServer()
+  // Generate the token in the server process that is already starting. The
+  // old Lua-side flow synchronously launched and waited for a throwaway Node
+  // process solely for randomBytes(), then launched Node again for the real
+  // server; on a cold filesystem that nearly doubled startup work.
+  const token = process.env.IPYNB_PEEK_TOKEN || randomBytes(32).toString("hex")
+  const server = await createServer(Number(process.env.IPYNB_PEEK_PORT ?? 0), token)
 
   /**
    * Neovim reads these lines from stdout to confirm the server is up, learn
@@ -744,5 +759,6 @@ if (import.meta.main) {
    * which URL to open the popup browser window at.
    */
   console.log(`IPYNB_PEEK_PORT=${server.port}`)
+  console.log(`IPYNB_PEEK_TOKEN=${token}`)
   console.log(`IPYNB_PEEK_URL=http://127.0.0.1:${server.port}/`)
 }

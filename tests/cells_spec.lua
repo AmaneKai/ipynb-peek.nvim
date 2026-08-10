@@ -84,6 +84,27 @@ describe("cells.parse", function()
     assert.is_true(parsed[1].editable)
     assert.is_true(parsed[1].deletable)
   end)
+
+  it("reuses a parsed snapshot until changedtick advances", function()
+    local bufnr = make_buffer({ "# %%", "1 + 1" })
+    local first = cells.parse(bufnr)
+
+    assert.is_true(rawequal(first, cells.parse(bufnr)))
+
+    vim.api.nvim_buf_set_lines(bufnr, 2, 2, false, { "# %%", "2 + 2" })
+    local updated = cells.parse(bufnr)
+    assert.is_false(rawequal(first, updated))
+    assert.are.equal(2, #updated)
+  end)
+
+  it("can explicitly release a retained snapshot", function()
+    local bufnr = make_buffer({ "# %%", "1 + 1" })
+    local first = cells.parse(bufnr)
+
+    cells.invalidate(bufnr)
+
+    assert.is_false(rawequal(first, cells.parse(bufnr)))
+  end)
 end)
 
 describe("cells.cell_index_at", function()

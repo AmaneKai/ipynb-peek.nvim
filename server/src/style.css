@@ -34,6 +34,11 @@ body {
 }
 .cell {
   position: relative;
+  /* Let Chromium skip layout/paint for distant cells while retaining a
+   * useful estimated scroll height. DOM state stays present, so cursor-sync
+   * scrollIntoView and live cell replacement continue to work normally. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 180px;
   margin-bottom: 28px;
   padding-left: 12px;
   margin-left: -15px;

@@ -17,6 +17,9 @@ package.loaded["ipynb-peek.browser"] =
   { find = function() end, open = function() end, close = function() end }
 package.loaded["ipynb-peek.client"] = {
   request = function() end,
+  debounce = function(_, _, callback)
+    callback()
+  end,
   debounced_request = function() end,
   cancel_debounced = function() end,
 }

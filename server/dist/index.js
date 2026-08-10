@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { extname } from "node:path";
 import readline from "node:readline";
+import { randomBytes } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 
 // src/notebook.ts
@@ -873,6 +874,8 @@ async function handleRequest(req, res) {
     return serveAsset(res, url.pathname.slice(1), "font/woff2");
   if (url.pathname === "/client.js")
     return serveAsset(res, "client.js", "text/javascript; charset=utf-8");
+  if (url.pathname === "/math-renderer.js")
+    return serveAsset(res, "math-renderer.js", "text/javascript; charset=utf-8");
   if (url.pathname === "/health") {
     res.writeHead(200, { "content-type": "text/plain" });
     return res.end("ok");
@@ -908,6 +911,7 @@ async function handleRequest(req, res) {
   }
   if (url.pathname === "/render" && req.method === "POST") {
     return handleJsonRoute(res, async () => {
+      const hadExistingServerState = currentCells.length > 0;
       const dirHeader = req.headers["x-notebook-dir"];
       if (typeof dirHeader === "string") notebookDir = dirHeader;
       const pathHeader = req.headers["x-notebook-path"];
@@ -918,7 +922,7 @@ async function handleRequest(req, res) {
       currentCells = mergeCells(currentCells, renderNotebook(nb));
       reconcileBusyStatus(currentCells, pendingExecs);
       broadcastFull();
-      await persistOutputsToDisk();
+      if (hadExistingServerState) await persistOutputsToDisk();
     });
   }
   if (url.pathname === "/sync" && req.method === "POST") {
@@ -1069,8 +1073,10 @@ function createServer(port = Number(process.env.IPYNB_PEEK_PORT ?? 0), token = p
   });
 }
 if (import.meta.main) {
-  const server = await createServer();
+  const token = process.env.IPYNB_PEEK_TOKEN || randomBytes(32).toString("hex");
+  const server = await createServer(Number(process.env.IPYNB_PEEK_PORT ?? 0), token);
   console.log(`IPYNB_PEEK_PORT=${server.port}`);
+  console.log(`IPYNB_PEEK_TOKEN=${token}`);
   console.log(`IPYNB_PEEK_URL=http://127.0.0.1:${server.port}/`);
 }
 export {

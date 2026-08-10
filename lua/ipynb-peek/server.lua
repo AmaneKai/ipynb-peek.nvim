@@ -8,8 +8,10 @@ M.error = nil
 --- Per-session shared secret the server requires on every state-changing
 --- request and the /ws upgrade (see server/src/index.ts's isAuthorized) -
 --- without it, any other page open in the user's browser could drive the
---- kernel just by knowing/scanning the port. Regenerated on every
---- M.start(). client.lua reads this to authenticate its own requests.
+--- kernel just by knowing/scanning the port. The server generates it inside
+--- its existing Node process and reports it with its ready lines, avoiding a
+--- second blocking Node cold start. client.lua reads it to authenticate its
+--- own requests.
 M.token = nil
 --- The opts.theme actually used to spawn the currently-running server -
 --- kept around purely so a second M.start() while one is already running
@@ -17,20 +19,6 @@ M.token = nil
 --- about it (see M.start below).
 local active_theme = nil
 local stopping = false
-
-local function generate_token()
-  local result = vim
-    .system({
-      "node",
-      "-e",
-      'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))',
-    }, { text = true })
-    :wait()
-  if result.code ~= 0 or not result.stdout or not result.stdout:match("^[0-9a-f]+$") then
-    return nil, "failed to generate a cryptographically secure session token"
-  end
-  return result.stdout
-end
 
 --- Starts the render server (a prebuilt dist/index.js, committed to the
 --- repo - see server/build.mjs) if not already running. The server/kernel
@@ -57,15 +45,10 @@ function M.start(opts)
   M.url = nil
   M.ready = false
   M.error = nil
-  local token, token_error = generate_token()
-  if not token then
-    M.error = token_error
-    return false
-  end
-  M.token = token
+  M.token = nil
   active_theme = opts.theme
 
-  local env = { IPYNB_PEEK_PORT = "0", IPYNB_PEEK_TOKEN = M.token }
+  local env = { IPYNB_PEEK_PORT = "0" }
   if opts.theme ~= nil then
     env.IPYNB_PEEK_THEME = vim.json.encode(opts.theme)
   end
@@ -78,11 +61,13 @@ function M.start(opts)
     stdout_buffered = false,
     on_stdout = function(_, data)
       for _, line in ipairs(data) do
-        if line:match("^IPYNB_PEEK_URL=") then
+        if line:match("^IPYNB_PEEK_TOKEN=") then
+          M.token = line:match("^IPYNB_PEEK_TOKEN=([0-9a-f]+)$")
+        elseif line:match("^IPYNB_PEEK_URL=") then
           M.url = line:match("^IPYNB_PEEK_URL=(.+)$")
           M.port = tonumber(M.url:match(":(%d+)/?$"))
-          M.ready = true
         end
+        M.ready = M.token ~= nil and M.url ~= nil and M.port ~= nil
       end
     end,
     on_stderr = function(_, data)
