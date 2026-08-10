@@ -1,4 +1,5 @@
 import { AnsiUp } from "ansi_up"
+import DOMPurify from "dompurify"
 import hljs from "highlight.js/lib/core"
 import python from "highlight.js/lib/languages/python"
 import renderMathInElement from "katex/contrib/auto-render"
@@ -147,13 +148,13 @@ hljs.registerLanguage("python", python)
       } else if (out.kind === "html") {
         const div = document.createElement("div")
         div.className = "table-scroll"
-        div.innerHTML = out.content
+        div.innerHTML = DOMPurify.sanitize(out.content)
         localizeImages(div)
         wrap.appendChild(div)
       } else if (out.kind === "markdown") {
         const div = document.createElement("div")
         div.className = "md-cell"
-        div.innerHTML = marked.parse(out.content || "")
+        div.innerHTML = DOMPurify.sanitize(marked.parse(out.content || ""))
         localizeImages(div)
         renderMath(div)
         wrap.appendChild(div)
@@ -225,7 +226,7 @@ hljs.registerLanguage("python", python)
     if (cell.cell_type === "markdown") {
       el.classList.add("md-cell")
       const content = document.createElement("div")
-      content.innerHTML = marked.parse(cell.source || "")
+      content.innerHTML = DOMPurify.sanitize(marked.parse(cell.source || ""))
       localizeImages(content)
       renderMath(content)
       el.appendChild(content)

@@ -3,7 +3,7 @@ import http from "node:http";
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { extname, resolve, sep } from "node:path";
+import { extname } from "node:path";
 import readline from "node:readline";
 import { WebSocketServer, WebSocket } from "ws";
 
@@ -547,6 +547,27 @@ function buildThemeCss(rawConfig) {
   return lines.join("\n");
 }
 
+// src/asset-path.ts
+import { realpathSync } from "node:fs";
+import { isAbsolute, relative, resolve, sep } from "node:path";
+var AssetOutsideNotebookDirectoryError = class extends Error {
+  constructor() {
+    super("asset path escapes the notebook directory");
+    this.name = "AssetOutsideNotebookDirectoryError";
+  }
+};
+function resolveNotebookAssetPath(notebookDir2, requestedPath) {
+  const root = realpathSync(resolve(notebookDir2));
+  const unresolvedAssetPath = resolve(root, requestedPath);
+  const assetPath = realpathSync(unresolvedAssetPath);
+  const pathFromRoot = relative(root, assetPath);
+  const escapesRoot = pathFromRoot === ".." || pathFromRoot.startsWith(`..${sep}`) || isAbsolute(pathFromRoot);
+  if (escapesRoot) {
+    throw new AssetOutsideNotebookDirectoryError();
+  }
+  return assetPath;
+}
+
 // src/index.ts
 var currentCells = [];
 var notebookKernelName;
@@ -861,10 +882,14 @@ async function handleRequest(req, res) {
     const requested = url.searchParams.get("path");
     if (!notebookDir || !requested)
       return sendJson(res, 404, { ok: false, error: "notebook asset not found" });
-    const root = resolve(notebookDir);
-    const assetPath = resolve(root, requested);
-    if (assetPath !== root && !assetPath.startsWith(root + sep))
-      return sendJson(res, 403, { ok: false, error: "asset path leaves notebook directory" });
+    let assetPath;
+    try {
+      assetPath = resolveNotebookAssetPath(notebookDir, requested);
+    } catch (err) {
+      if (err instanceof AssetOutsideNotebookDirectoryError)
+        return sendJson(res, 403, { ok: false, error: "asset path leaves notebook directory" });
+      return sendJson(res, 404, { ok: false, error: "notebook asset not found" });
+    }
     const contentTypes = {
       ".png": "image/png",
       ".jpg": "image/jpeg",

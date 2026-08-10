@@ -2,7 +2,7 @@ import http from "node:http"
 import { spawn } from "node:child_process"
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
-import { extname, resolve, sep } from "node:path"
+import { extname } from "node:path"
 import readline from "node:readline"
 import { WebSocketServer, WebSocket } from "ws"
 import {
@@ -17,6 +17,7 @@ import {
 import { handleIopub, reconcileBusyStatus, type PendingExec } from "./iopub"
 import { updateNotebookFile } from "./persist"
 import { buildThemeCss } from "./themes"
+import { resolveNotebookAssetPath, AssetOutsideNotebookDirectoryError } from "./asset-path"
 
 let currentCells: RenderedCell[] = []
 let notebookKernelName: string | undefined
@@ -475,10 +476,14 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     const requested = url.searchParams.get("path")
     if (!notebookDir || !requested)
       return sendJson(res, 404, { ok: false, error: "notebook asset not found" })
-    const root = resolve(notebookDir)
-    const assetPath = resolve(root, requested)
-    if (assetPath !== root && !assetPath.startsWith(root + sep))
-      return sendJson(res, 403, { ok: false, error: "asset path leaves notebook directory" })
+    let assetPath: string
+    try {
+      assetPath = resolveNotebookAssetPath(notebookDir, requested)
+    } catch (err) {
+      if (err instanceof AssetOutsideNotebookDirectoryError)
+        return sendJson(res, 403, { ok: false, error: "asset path leaves notebook directory" })
+      return sendJson(res, 404, { ok: false, error: "notebook asset not found" })
+    }
     const contentTypes: Record<string, string> = {
       ".png": "image/png",
       ".jpg": "image/jpeg",

@@ -1,5 +1,8 @@
 import { describe, test, expect, beforeAll, afterAll } from "vitest"
 import http from "node:http"
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { WebSocket } from "ws"
 import { createServer } from "./index"
 
@@ -112,7 +115,25 @@ describe("GET /notebook-asset", () => {
     })
 
     expect((await fetch(`${baseUrl}/notebook-asset?path=package.json`)).status).toBe(200)
-    expect((await fetch(`${baseUrl}/notebook-asset?path=../package.json`)).status).toBe(403)
+    expect((await fetch(`${baseUrl}/notebook-asset?path=../README.md`)).status).toBe(403)
+  })
+
+  test("rejects assets reached through a symlink that escapes the notebook directory", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ipynb-peek-asset-"))
+    const secretDir = await mkdtemp(join(tmpdir(), "ipynb-peek-secret-"))
+    await writeFile(join(secretDir, "secret.txt"), "top secret")
+    await symlink(secretDir, join(dir, "escape"))
+
+    await fetch(`${baseUrl}/render`, {
+      method: "POST",
+      headers: { "x-notebook-dir": dir },
+      body: JSON.stringify({ metadata: {}, cells: [] }),
+    })
+
+    expect((await fetch(`${baseUrl}/notebook-asset?path=escape/secret.txt`)).status).toBe(403)
+
+    await rm(dir, { recursive: true, force: true })
+    await rm(secretDir, { recursive: true, force: true })
   })
 })
 
