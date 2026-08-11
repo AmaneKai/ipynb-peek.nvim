@@ -179,9 +179,25 @@ local function close_wmctrl_match(tag, line)
   vim.fn.jobstart({ "wmctrl", "-ic", window_id }, { detach = true })
 end
 
+--- Both mimic the same `search --name <pattern> windowclose` CLI, but see
+--- different windows: xdotool only sees X11/XWayland windows (via EWMH),
+--- kdotool only sees windows KWin knows about (via its scripting API, which
+--- covers both native-Wayland and X11 KWin sessions, and on wlroots
+--- compositors like Sway/Hyprland via wlr-foreign-toplevel-management).
+--- There's no way to tell from here whether the popup ended up XWayland or
+--- native-Wayland, so both are tried when present - whichever doesn't find
+--- a matching window is a harmless no-op.
+local XDOTOOL_COMPATIBLE = { "kdotool", "xdotool" }
+
 local function close_linux(tag)
-  if vim.fn.executable("xdotool") == 1 then
-    vim.fn.jobstart({ "xdotool", "search", "--name", tag, "windowclose" }, { detach = true })
+  local ran_one = false
+  for _, bin in ipairs(XDOTOOL_COMPATIBLE) do
+    if vim.fn.executable(bin) == 1 then
+      vim.fn.jobstart({ bin, "search", "--name", tag, "windowclose" }, { detach = true })
+      ran_one = true
+    end
+  end
+  if ran_one then
     return
   end
   if vim.fn.executable("wmctrl") == 1 then

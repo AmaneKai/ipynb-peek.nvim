@@ -141,14 +141,32 @@ local function check_mac_automation_permission()
   end
 end
 
+--- xdotool/wmctrl are X11-only (via EWMH) and won't see a native-Wayland
+--- popup window at all; kdotool covers that case on KWin (and on wlroots
+--- compositors like Sway/Hyprland via wlr-foreign-toplevel-management).
+--- Recommends kdotool specifically under Wayland since xdotool/wmctrl alone
+--- would silently do nothing there.
 local function check_linux_popup_close_tools()
   if vim.fn.has("linux") ~= 1 then
     return
   end
-  if exe("xdotool") or exe("wmctrl") then
-    health.ok("xdotool/wmctrl found - popup auto-close should work")
+  local is_wayland = os.getenv("WAYLAND_DISPLAY") ~= nil or os.getenv("XDG_SESSION_TYPE") == "wayland"
+  local have_kdotool = exe("kdotool")
+  local have_x11_tool = exe("xdotool") or exe("wmctrl")
+
+  if is_wayland then
+    if have_kdotool then
+      health.ok("kdotool found - popup auto-close should work under Wayland")
+    else
+      health.warn("Wayland session detected but kdotool not found", {
+        "xdotool/wmctrl can't see native-Wayland windows, so the preview popup won't auto-close; "
+          .. "install kdotool (works on KWin and wlroots compositors like Sway/Hyprland)",
+      })
+    end
+  elseif have_x11_tool or have_kdotool then
+    health.ok("xdotool/wmctrl/kdotool found - popup auto-close should work")
   else
-    health.warn("Neither xdotool nor wmctrl found", {
+    health.warn("Neither xdotool, wmctrl, nor kdotool found", {
       "The preview popup won't auto-close when the notebook buffer closes; "
         .. "install xdotool or wmctrl if you want that",
     })
