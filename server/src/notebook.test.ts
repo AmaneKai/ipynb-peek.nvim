@@ -338,6 +338,21 @@ describe("mergeCells", () => {
     const fresh = [{ index: 0, cell_type: "code" as const, source: "1 + 1", outputs: [] }]
     expect(mergeCells([], fresh)).toEqual(fresh)
   })
+
+  test("keeps a first-run cell busy across a re-render, before it has any output", () => {
+    const previous = [
+      {
+        index: 0,
+        cell_type: "code" as const,
+        source: "time.sleep(5)",
+        outputs: [],
+        status: "busy" as const,
+      },
+    ]
+    const fresh = [{ index: 0, cell_type: "code" as const, source: "time.sleep(5)", outputs: [] }]
+
+    expect(mergeCells(previous, fresh)[0].status).toBe("busy")
+  })
 })
 
 describe("syncCells", () => {

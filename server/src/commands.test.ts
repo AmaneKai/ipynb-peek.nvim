@@ -101,4 +101,45 @@ describe("commands", () => {
       .catch((e) => e)
     expect(outcome instanceof Error || outcome?.status === 400).toBe(true)
   })
+
+  it("shows a cell as running while the kernel is still starting", async () => {
+    server = await createServer(0)
+    await server.commands.render(
+      JSON.stringify({
+        nbformat: 4,
+        nbformat_minor: 5,
+        metadata: { kernelspec: { name: "no-such-kernel-for-test" } },
+        cells: [
+          { cell_type: "code", source: "1", metadata: {}, outputs: [], execution_count: null },
+        ],
+      }),
+    )
+    const events: any[] = []
+    server.session.subscribe((line) => events.push(JSON.parse(line)))
+
+    const running = server.commands.execute({ index: 0, code: "1" })
+    // The kernel cannot be up yet, but the cell must already read as busy.
+    expect(server.session.cells[0].status).toBe("busy")
+    expect(server.session.pendingExecs.size).toBe(1)
+    expect(events.some((e) => e.type === "cell_status" && e.status === "busy")).toBe(true)
+
+    // A render arriving mid-start must not flip it back to idle.
+    await server.commands.render(
+      JSON.stringify({
+        nbformat: 4,
+        nbformat_minor: 5,
+        metadata: { kernelspec: { name: "no-such-kernel-for-test" } },
+        cells: [
+          { cell_type: "code", source: "1", metadata: {}, outputs: [], execution_count: null },
+        ],
+      }),
+    )
+    expect(server.session.cells[0].status).toBe("busy")
+
+    // The start fails (no such kernel): the cell ends idle with exactly one error.
+    await expect(running).rejects.toThrow()
+    expect(server.session.cells[0].status).toBe("idle")
+    expect(server.session.cells[0].outputs.filter((o) => o.kind === "error")).toHaveLength(1)
+    expect(server.session.pendingExecs.size).toBe(0)
+  }, 30000)
 })

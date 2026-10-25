@@ -270,7 +270,9 @@ export function mergeCells(previous: RenderedCell[], fresh: RenderedCell[]): Ren
       prevCell &&
       prevCell.source === cell.source &&
       prevCell.cell_type === cell.cell_type &&
-      (prevCell.outputs.length > 0 || prevCell.execution_count)
+      // A cell on its very first run has neither outputs nor an execution
+      // count yet, but must not lose its busy state to an unrelated re-render.
+      (prevCell.outputs.length > 0 || prevCell.execution_count || prevCell.status === "busy")
     ) {
       return {
         ...cell,

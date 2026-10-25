@@ -146,7 +146,9 @@ function renderNotebook(nb) {
 function mergeCells(previous, fresh) {
   return fresh.map((cell, index) => {
     const prevCell = previous[index];
-    if (prevCell && prevCell.source === cell.source && prevCell.cell_type === cell.cell_type && (prevCell.outputs.length > 0 || prevCell.execution_count)) {
+    if (prevCell && prevCell.source === cell.source && prevCell.cell_type === cell.cell_type && // A cell on its very first run has neither outputs nor an execution
+    // count yet, but must not lose its busy state to an unrelated re-render.
+    (prevCell.outputs.length > 0 || prevCell.execution_count || prevCell.status === "busy")) {
       return {
         ...cell,
         outputs: prevCell.outputs,
@@ -849,7 +851,6 @@ function createCommands(session, kernel) {
       const code = body.code ?? "";
       if (typeof index !== "number" || typeof code !== "string" || session.cells[index]?.cell_type !== "code")
         return { status: 400, body: { ok: false, error: "invalid cell index" } };
-      await kernel.ensureStarted(session.kernelName || "python3");
       const cell = session.cells[index];
       const msgId = crypto.randomUUID();
       cell.source = code;
@@ -860,14 +861,24 @@ function createCommands(session, kernel) {
       cell.started_at = void 0;
       cell.duration_ms = void 0;
       session.broadcastCell(index);
+      const abandon = (error) => {
+        const pending = session.pendingExecs.get(msgId);
+        if (!pending) return;
+        session.pendingExecs.delete(msgId);
+        const failed = session.pendingCellIndex(pending);
+        if (failed === null) return;
+        appendExecutionFailure(
+          session.cells[failed],
+          String(error instanceof Error ? error.message : error)
+        );
+        session.cells[failed].status = "idle";
+        session.broadcastCell(failed);
+      };
       try {
+        await kernel.ensureStarted(session.kernelName || "python3");
         kernel.write({ cmd: "execute", id: msgId, code, allow_stdin: session.wsClients.size > 0 });
       } catch (error) {
-        session.pendingExecs.delete(msgId);
-        const message = String(error instanceof Error ? error.message : error);
-        appendExecutionFailure(cell, message);
-        cell.status = "idle";
-        session.broadcastCell(index);
+        abandon(error);
         throw error;
       }
     },

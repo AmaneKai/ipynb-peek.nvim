@@ -52,8 +52,6 @@ export function createCommands(session: NotebookSession, kernel: KernelCoordinat
       )
         return { status: 400, body: { ok: false, error: "invalid cell index" } }
 
-      await kernel.ensureStarted(session.kernelName || "python3")
-
       const cell = session.cells[index]
       const msgId = crypto.randomUUID()
       // The execution request is the newest authoritative version of this
@@ -61,6 +59,9 @@ export function createCommands(session: NotebookSession, kernel: KernelCoordinat
       // the server's older source here can make output impossible to resolve
       // as soon as that sync lands while the cell is running.
       cell.source = code
+      // Registered before the kernel is up, so the cell shows as running (and
+      // survives reconcileBusyStatus) through a slow cold start instead of
+      // looking idle until the kernel finally answers.
       session.pendingExecs.set(msgId, { index, id: cell.id, source: code })
       cell.outputs = []
       cell.nbformat_outputs = []
@@ -74,17 +75,33 @@ export function createCommands(session: NotebookSession, kernel: KernelCoordinat
       cell.duration_ms = undefined
       session.broadcastCell(index)
 
+      /**
+       * Ends a request that never reached the kernel. A failed start already
+       * failed every pending execution (this one included), so only clean up
+       * if that hasn't happened - e.g. a restart cancelled the start.
+       */
+      const abandon = (error: unknown) => {
+        const pending = session.pendingExecs.get(msgId)
+        if (!pending) return
+        session.pendingExecs.delete(msgId)
+        const failed = session.pendingCellIndex(pending)
+        if (failed === null) return
+        appendExecutionFailure(
+          session.cells[failed],
+          String(error instanceof Error ? error.message : error),
+        )
+        session.cells[failed].status = "idle"
+        session.broadcastCell(failed)
+      }
+
       try {
+        await kernel.ensureStarted(session.kernelName || "python3")
         // Only offer stdin when a browser is actually connected to answer
         // it - otherwise a blocked input()/getpass() would hang the kernel
         // waiting on an input_reply nothing could ever send.
         kernel.write({ cmd: "execute", id: msgId, code, allow_stdin: session.wsClients.size > 0 })
       } catch (error) {
-        session.pendingExecs.delete(msgId)
-        const message = String(error instanceof Error ? error.message : error)
-        appendExecutionFailure(cell, message)
-        cell.status = "idle"
-        session.broadcastCell(index)
+        abandon(error)
         throw error
       }
     },
