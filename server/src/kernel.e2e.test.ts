@@ -182,4 +182,39 @@ describeKernel("real ipykernel workflow", () => {
     )
     expect(settled.cell.source).toBe(code)
   }, 20000)
+
+  test("lists user variables quietly, without touching the execution count", async () => {
+    const code = "import sys\nxs = list(range(1000))\ndef helper(): pass\nlabel = 'hi'"
+    await post("/execute", { index: 0, code })
+    const settled = await waitForMessage(
+      (message) =>
+        message.type === "cell_update" && message.index === 0 && message.cell.status === "idle",
+    )
+    const executionCount = settled.cell.execution_count
+
+    const result: any = await post("/variables", {})
+
+    expect(result.kernel_running).toBe(true)
+    const names = result.variables.map((v: any) => v.name)
+    expect(names).toContain("xs")
+    expect(names).toContain("label")
+    // modules and functions are hidden, as in %whos
+    expect(names).not.toContain("sys")
+    expect(names).not.toContain("helper")
+    const xs = result.variables.find((v: any) => v.name === "xs")
+    expect(xs).toMatchObject({ type: "list", shape: "1000 items" })
+    expect(xs.size_bytes).toBeGreaterThan(1000)
+
+    // The inspection must not have bumped the counter: the next real run follows on.
+    await post("/execute", { index: 0, code: "1 + 1" })
+    const next = await waitForMessage(
+      (message) =>
+        message.type === "cell_update" &&
+        message.index === 0 &&
+        message.cell.status === "idle" &&
+        message.cell.execution_count != null &&
+        message.cell.execution_count !== executionCount,
+    )
+    expect(next.cell.execution_count).toBe(executionCount + 1)
+  }, 45000)
 })

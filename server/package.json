@@ -21,7 +21,12 @@
     "highlight.js": "11.11.1",
     "katex": "0.16.22",
     "marked": "16.4.2",
+    "plotly.js-strict-dist-min": "4.1.2",
     "prettier": "^3.9.6",
+    "vega": "6.4.0",
+    "vega-embed": "7.3.0",
+    "vega-interpreter": "2.3.2",
+    "vega-lite": "6.5.0",
     "vitest": "^4.1.10"
   }
 }

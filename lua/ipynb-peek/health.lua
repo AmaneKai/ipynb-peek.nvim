@@ -38,7 +38,7 @@ local function check_jupytext_format()
 end
 
 local function check_external_binaries()
-  for _, binary in ipairs({ "node", "curl" }) do
+  for _, binary in ipairs({ "node" }) do
     if exe(binary) then
       health.ok(binary .. " found on PATH")
     else
@@ -94,12 +94,16 @@ local function check_jupyter_kernels()
   end
 end
 
+local function configured_browser()
+  local ok, plugin = pcall(require, "ipynb-peek")
+  return require("ipynb-peek.browser").find(ok and plugin.config.browser or nil)
+end
+
 local function check_browser()
-  local browser = require("ipynb-peek.browser").find()
+  local browser = configured_browser()
   if browser then
-    health.ok(
-      "Chromium-based browser found (" .. (browser.name or browser.binary or browser.path) .. ")"
-    )
+    local family = browser.driver == "firefox" and "Firefox" or "Chromium-based browser"
+    health.ok(family .. " found (" .. (browser.name or browser.binary or browser.path) .. ")")
   else
     health.warn("No supported Chromium-based browser found", {
       "ipynb-peek will fall back to opening a normal browser tab instead of an app-mode popup",
@@ -108,7 +112,7 @@ local function check_browser()
 end
 
 --- Popup auto-close on mac uses AppleScript to close the browser window
---- (see browser.lua's close_mac), which macOS gates behind Automation/
+--- (see browser/windows/mac.lua), which macOS gates behind Automation/
 --- AppleEvents permission for whatever terminal/GUI app runs Neovim -
 --- checked here proactively (rather than only discovered the first time
 --- :IpynbPeekClose/quit silently fails to close anything) by running the
@@ -120,8 +124,8 @@ local function check_mac_automation_permission()
   if vim.fn.has("mac") ~= 1 then
     return
   end
-  local browser = require("ipynb-peek.browser").find()
-  if not browser then
+  local browser = configured_browser()
+  if not browser or browser.driver ~= "chromium" then
     return -- already reported by check_browser() above
   end
   local out =

@@ -1,5 +1,4 @@
 :root {
-  color-scheme: dark;
   /*
    * Appended after every font stack's Latin-first faces (never as the sole
    * fallback) so Japanese/Chinese glyphs render via a real CJK-capable face
@@ -221,25 +220,6 @@ body {
 .outputs img:hover {
   opacity: 0.92;
 }
-#lightbox {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.85);
-  display: none;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-  cursor: zoom-out;
-}
-#lightbox.open {
-  display: flex;
-}
-#lightbox img {
-  max-width: 92vw;
-  max-height: 92vh;
-  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
-  border-radius: 4px;
-}
 #stdin-bar {
   position: fixed;
   left: 0;
@@ -412,4 +392,426 @@ body {
 }
 .hljs-strong {
   font-weight: bold;
+}
+
+/* ---------- toolbar, outline, panels ---------- */
+:root {
+  --toolbar-height: 38px;
+  --toc-width: 260px;
+}
+body {
+  padding-top: var(--toolbar-height);
+}
+#toolbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--toolbar-height);
+  z-index: 800;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  background: var(--ipynb-surface, #252526);
+  border-bottom: 1px solid var(--ipynb-border, #3c3c3c);
+  font-size: 12px;
+}
+#doc-title {
+  color: var(--ipynb-muted, #6a6a6a);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.toolbar-spacer {
+  flex: 1;
+}
+.tool-btn {
+  font: inherit;
+  font-size: 12px;
+  color: var(--ipynb-fg, #d4d4d4);
+  background: transparent;
+  border: 1px solid var(--ipynb-border, #3c3c3c);
+  border-radius: 4px;
+  padding: 3px 9px;
+  cursor: pointer;
+  text-decoration: none;
+}
+.tool-btn:hover,
+.tool-btn.on {
+  border-color: var(--ipynb-accent, #007acc);
+  color: var(--ipynb-accent, #007acc);
+}
+select.tool-btn {
+  background: var(--ipynb-surface, #252526);
+}
+#notebook-toc,
+#variables-panel {
+  position: fixed;
+  top: var(--toolbar-height);
+  bottom: 0;
+  z-index: 700;
+  display: none;
+  overflow-y: auto;
+  background: var(--ipynb-surface, #252526);
+  font-size: 12px;
+}
+#notebook-toc {
+  left: 0;
+  width: var(--toc-width);
+  border-right: 1px solid var(--ipynb-border, #3c3c3c);
+  padding: 6px 0;
+}
+body.toc-open #notebook-toc {
+  display: block;
+}
+body.toc-open #notebook-pane {
+  margin-left: var(--toc-width);
+}
+#toc-resizer {
+  position: fixed;
+  top: var(--toolbar-height);
+  bottom: 0;
+  left: calc(var(--toc-width) - 3px);
+  width: 6px;
+  z-index: 710;
+  cursor: col-resize;
+  display: none;
+}
+body.toc-open #toc-resizer {
+  display: block;
+}
+.toc-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: var(--ipynb-fg, #d4d4d4);
+  background: transparent;
+  border: 0;
+  border-left: 2px solid transparent;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.toc-row:hover {
+  background: color-mix(in srgb, var(--ipynb-accent, #007acc) 12%, transparent);
+}
+.toc-row.active {
+  border-left-color: var(--ipynb-accent, #007acc);
+  background: color-mix(in srgb, var(--ipynb-accent, #007acc) 18%, transparent);
+}
+.toc-heading {
+  color: var(--ipynb-heading, #e8e8e8);
+  font-weight: 600;
+}
+.toc-code {
+  font-family:
+    var(--ipynb-font-mono, "SF Mono", Menlo, Consolas), var(--ipynb-cjk-mono-fallback), monospace;
+  font-size: 11px;
+}
+.toc-label {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.toc-count,
+.toc-time,
+.toc-empty {
+  color: var(--ipynb-dim, #5a5a5a);
+  font-size: 10px;
+}
+.toc-empty {
+  padding: 8px 12px;
+}
+.toc-badge.toc-ok {
+  color: #4caf50;
+}
+.toc-badge.toc-error {
+  color: var(--ipynb-error, #f48771);
+}
+.toc-badge.toc-idle {
+  color: var(--ipynb-dim, #5a5a5a);
+}
+.toc-badge.toc-busy {
+  color: var(--ipynb-accent, #007acc);
+  animation: toc-pulse 1s ease-in-out infinite;
+}
+@keyframes toc-pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+#variables-panel {
+  right: 0;
+  width: min(460px, 90vw);
+  border-left: 1px solid var(--ipynb-border, #3c3c3c);
+}
+body.variables-open #variables-panel {
+  display: block;
+}
+#variables-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--ipynb-border, #3c3c3c);
+}
+#variables-head strong {
+  flex: 1;
+}
+#variables-body {
+  padding: 8px 12px;
+}
+.vars-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.vars-table th,
+.vars-table td {
+  text-align: left;
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--ipynb-border, #3c3c3c);
+  vertical-align: top;
+}
+.vars-table td.num {
+  text-align: right;
+  white-space: nowrap;
+}
+.vars-table .preview {
+  color: var(--ipynb-muted, #6a6a6a);
+  word-break: break-all;
+}
+.vars-note {
+  color: var(--ipynb-muted, #6a6a6a);
+  padding: 4px 0;
+}
+.vars-error {
+  color: var(--ipynb-error, #f48771);
+  white-space: pre-wrap;
+}
+
+/* ---------- traceback links, folding ---------- */
+.traceback-jump {
+  color: var(--ipynb-accent, #007acc);
+  text-decoration: underline dotted;
+  cursor: pointer;
+}
+.traceback-jump:hover {
+  text-decoration: underline;
+}
+.code-box,
+.outputs {
+  position: relative;
+}
+.fold-btn {
+  position: absolute;
+  left: -22px;
+  top: 4px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  line-height: 16px;
+  font-size: 10px;
+  color: var(--ipynb-dim, #5a5a5a);
+  background: transparent;
+  border: 0;
+  border-radius: 3px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.1s ease;
+}
+.cell:hover .fold-btn {
+  opacity: 1;
+}
+.fold-btn:hover {
+  color: var(--ipynb-fg, #d4d4d4);
+  background: var(--ipynb-surface, #2d2d2d);
+}
+
+/* ---------- presentation mode ---------- */
+body.presentation-mode .code-box,
+body.presentation-mode .input-hidden-bar,
+body.presentation-mode .add-cell-bar,
+body.presentation-mode .delete-cell-btn,
+body.presentation-mode .fold-btn,
+body.presentation-mode .cell-number,
+body.presentation-mode .cell-tags {
+  display: none !important;
+}
+body.presentation-mode .cell.code-cell:not(:has(.outputs)) {
+  display: none;
+}
+
+/* ---------- lightbox ---------- */
+#lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: none;
+  flex-direction: column;
+  background: rgba(0, 0, 0, 0.88);
+}
+#lightbox.open {
+  display: flex;
+}
+#lightbox-toolbar {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  padding: 8px;
+  background: rgba(0, 0, 0, 0.4);
+}
+#lightbox-toolbar .tool-btn {
+  background: rgba(30, 30, 30, 0.9);
+  color: #d4d4d4;
+}
+#lightbox-stage {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  touch-action: none;
+}
+#lightbox-img {
+  max-width: none;
+  max-height: none;
+  cursor: grab;
+  user-select: none;
+  background: #fff;
+  border-radius: 4px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+}
+#lightbox-img:active {
+  cursor: grabbing;
+}
+
+/* ---------- interactive dataframes ---------- */
+.df-wrap {
+  max-width: 100%;
+}
+.df-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 11px;
+  color: var(--ipynb-muted, #6a6a6a);
+}
+.df-bar input[type="search"],
+.df-bar select {
+  font: inherit;
+  color: var(--ipynb-fg, #d4d4d4);
+  background: var(--ipynb-bg, #1e1e1e);
+  border: 1px solid var(--ipynb-border, #3c3c3c);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+.df-bar .tool-btn {
+  padding: 1px 7px;
+  font-size: 11px;
+}
+.df-bar .tool-btn[disabled] {
+  opacity: 0.4;
+  cursor: default;
+}
+.df-bar .df-status {
+  margin-left: auto;
+}
+.df-wrap th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+.df-wrap th.sortable:hover {
+  color: var(--ipynb-accent, #007acc);
+}
+.df-wrap th[aria-sort="ascending"]::after {
+  content: " ▲";
+  font-size: 9px;
+}
+.df-wrap th[aria-sort="descending"]::after {
+  content: " ▼";
+  font-size: 9px;
+}
+
+/* ---------- interactive charts ---------- */
+.chart-output {
+  width: 100%;
+  min-height: 320px;
+  margin: 6px 0;
+  background: #fff;
+  border-radius: 4px;
+  overflow: auto;
+}
+.chart-error {
+  color: var(--ipynb-error, #f48771);
+  font-size: 11px;
+}
+
+/* ---------- print / PDF ---------- */
+@media print {
+  :root {
+    color-scheme: light;
+  }
+  html,
+  body {
+    background: #fff !important;
+    color: #000 !important;
+  }
+  body {
+    padding-top: 0;
+  }
+  #toolbar,
+  #notebook-toc,
+  #toc-resizer,
+  #variables-panel,
+  #lightbox,
+  #stdin-bar,
+  .add-cell-bar,
+  .delete-cell-btn,
+  .fold-btn,
+  .interrupt-btn,
+  .df-bar {
+    display: none !important;
+  }
+  body.toc-open #notebook-pane {
+    margin-left: 0;
+  }
+  #notebook {
+    max-width: none;
+    padding: 0;
+  }
+  .cell {
+    content-visibility: visible;
+    break-inside: avoid;
+    border-left-color: transparent !important;
+    margin-left: 0;
+  }
+  .outputs.scrolled,
+  .outputs .table-scroll {
+    max-height: none !important;
+    overflow: visible !important;
+  }
+  .outputs img,
+  .outputs table,
+  .chart-output,
+  .error-output {
+    break-inside: avoid;
+    max-width: 100%;
+  }
+  .outputs tr {
+    break-inside: avoid;
+  }
+  h1,
+  h2,
+  h3,
+  h4 {
+    break-after: avoid;
+  }
 }

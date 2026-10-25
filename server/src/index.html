@@ -2,14 +2,52 @@
 <html>
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ipynb-peek</title>
     <meta name="ipynb-peek-token" content="__IPYNB_PEEK_TOKEN__" />
+    <meta name="ipynb-peek-themes" content="__IPYNB_PEEK_THEMES__" />
     <link rel="stylesheet" href="/theme.css" />
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
-    <div id="notebook"></div>
-    <div id="lightbox"><img id="lightbox-img" /></div>
+    <header id="toolbar">
+      <button id="toc-toggle" class="tool-btn" title="Outline" aria-label="Toggle outline">☰</button>
+      <span id="doc-title">ipynb-peek</span>
+      <span class="toolbar-spacer"></span>
+      <button id="variables-toggle" class="tool-btn" title="Kernel variables">Variables</button>
+      <select id="theme-select" class="tool-btn" title="Theme" aria-label="Theme"></select>
+      <button id="present-toggle" class="tool-btn" title="Hide code, show only prose and results">
+        Present
+      </button>
+      <button id="export-html" class="tool-btn" title="Export a standalone HTML report">
+        ↓ HTML
+      </button>
+      <button id="export-html-nocode" class="tool-btn" title="Export HTML without code inputs">
+        ↓ Report
+      </button>
+    </header>
+    <aside id="notebook-toc"><div id="toc-content"></div></aside>
+    <div id="toc-resizer" title="Drag to resize"></div>
+    <aside id="variables-panel">
+      <div id="variables-head">
+        <strong>Kernel variables</strong>
+        <button id="variables-refresh" class="tool-btn">Refresh</button>
+        <button id="variables-close" class="tool-btn" aria-label="Close">✕</button>
+      </div>
+      <div id="variables-body"></div>
+    </aside>
+    <main id="notebook-pane"><div id="notebook"></div></main>
+    <div id="lightbox">
+      <div id="lightbox-toolbar">
+        <button id="lb-zoom-in" class="tool-btn">Zoom In</button>
+        <button id="lb-zoom-out" class="tool-btn">Zoom Out</button>
+        <button id="lb-reset" class="tool-btn">100%</button>
+        <button id="lb-fit" class="tool-btn">Fit</button>
+        <a id="lb-download" class="tool-btn" download="plot">Download</a>
+        <button id="lb-close" class="tool-btn" aria-label="Close">✕</button>
+      </div>
+      <div id="lightbox-stage"><img id="lightbox-img" alt="" draggable="false" /></div>
+    </div>
     <div id="stdin-bar">
       <span id="stdin-prompt-text"></span>
       <input id="stdin-input" autocomplete="off" />

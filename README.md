@@ -17,6 +17,12 @@ Neovim isn't a great place to *look at* a notebook - cell outputs, images, rende
 - **Cell insert/delete from the preview.** Hover between cells for "+ Code" / "+ Markdown" buttons, or hover a cell for a ✕ delete button - both land as real edits in your Neovim buffer (a genuine `# %%` block gets inserted or removed), not something trapped in the browser. Note this deletes the cell; it does not stop a running one - use the ■ interrupt button for that.
 - **Click-to-zoom images.** Plot output too small to read? Click it for a full-size overlay.
 - **Kernel restart on demand**, for the moment you `pip install`/`uv pip install` something new and the running kernel hasn't picked it up yet.
+- **Click a traceback, land on the line.** Errors in the preview have clickable locations: `Cell In[3], line 4` puts your Neovim cursor on that line of that cell, and `File "model.py", line 42` frames open the file at the right line (existing, readable files only).
+- **Outline everywhere.** A collapsible, resizable outline sidebar in the preview (markdown headings plus every code cell, with live running / ✓ / ✗ badges and timings; click to jump both the page and your cursor), and `:IpynbPeekOutline` for the same tree in a Neovim float.
+- **Data-science outputs.** pandas/polars tables become paged, sortable, filterable grids with Copy CSV / Copy Markdown; Plotly, Altair/Vega-Lite and Vega outputs render as interactive charts; images open in a pan/zoom lightbox with download. The chart runtimes are separate lazy bundles - nothing is fetched until a cell outputs one.
+- **Kernel cockpit.** `:IpynbPeekVariables` lists the kernel's variables with type, shape, memory and a preview (taken with a quiet execution that doesn't touch your execution counter); `:IpynbPeekSelectKernel` switches Jupyter kernels through `vim.ui.select` (so telescope/fzf-lua pickers apply).
+- **Reports.** `:IpynbPeekExport html` writes a self-contained HTML file (theme inlined, plots baked in as images, full tables), `report` does the same without code inputs, and `pdf` opens the print dialog - the print stylesheet strips the chrome and avoids splitting cells across pages.
+- **Live themes and presentation mode.** Switch palettes from the preview toolbar or `:IpynbPeekTheme gruvbox` with no restart and no kernel disruption; "Present" hides code and shows only prose, plots and tables. Cells fold with a margin arrow.
 - **Chromeless popup**, not a browser tab cluttering your normal browsing - a dedicated app-mode window, sized and positioned however you like.
 - **Themeable preview.** Built-in `dark`, `tokyonight`, `gruvbox`, and `rose-pine` presets, plus per-token color overrides and custom UI/monospace fonts and sizes - see `theme` in [Configuration](#configuration).
 - **Offline, self-contained frontend.** Markdown, syntax highlighting, math, and ANSI rendering are bundled with the plugin; the preview never executes JavaScript from a CDN.
@@ -25,8 +31,7 @@ Neovim isn't a great place to *look at* a notebook - cell outputs, images, rende
 
 - **Neovim 0.10+** (uses `vim.system`)
 - **[jupytext.vim](https://github.com/goerz/jupytext.vim)** - hard dependency. This plugin converts `.ipynb` buffers into a `# %%`-delimited Python view; ipynb-peek reads and writes that view directly. Without it, opening a `.ipynb` file just shows raw JSON and nothing here will work. See [Dependency setup](#dependency-setup) below for exact install steps.
-- **[node](https://nodejs.org) 22.18+** (or 24.2+) - runs the preview server and the kernel bridge (see [How it works](#how-it-works) for why those are two processes). The 22.18/24.2 floor is for `import.meta.main`, which the server relies on.
-- **curl** - used for the Neovim-server HTTP/event channel
+- **[node](https://nodejs.org) 22.18+** (or 24.2+) - runs the preview server and the kernel bridge (see [How it works](#how-it-works) for why those are two processes). This is the range the plugin is tested on.
 - **jupyter + ipykernel**, with at least one registered kernel
 - A Chromium-based browser (Chrome, Brave, Edge, or Chromium) - optional. This is only needed for the chromeless "app mode" popup window; `--app=<url>` is a Chromium-specific flag with no real Firefox/Safari equivalent. Without one, ipynb-peek opens the preview as a normal tab in your default browser instead - everything else (live sync, execution, cell insert/delete, all of it) works identically either way, you just get browser chrome around it instead of a floating window.
 
@@ -39,7 +44,7 @@ Pick your OS below. After installing everything here, skip to [Installation](#in
 ### macOS
 
 ```sh
-# Neovim, node, curl (curl ships with macOS already)
+# Neovim, node
 brew install neovim node
 
 # jupyter + ipykernel
@@ -58,9 +63,6 @@ Run in PowerShell:
 winget install Neovim.Neovim
 winget install OpenJS.NodeJS.LTS
 
-# curl - already included on Windows 10/11; if missing:
-winget install cURL.cURL
-
 # jupyter + ipykernel (requires Python; installs it if missing)
 winget install Python.Python.3.12
 pip install --user jupyter ipykernel
@@ -72,9 +74,9 @@ winget install Google.Chrome
 ### Linux - Debian / Ubuntu (`apt`)
 
 ```sh
-# curl, node
+# node
 sudo apt update
-sudo apt install curl nodejs npm
+sudo apt install nodejs npm
 
 # Neovim - Ubuntu/Debian's apt package is often too old for the 0.10+
 # requirement; the PPA (Ubuntu) or a manual AppImage/tarball (Debian) gets
@@ -94,8 +96,8 @@ sudo apt install chromium
 ### Linux - Fedora (`dnf`)
 
 ```sh
-# Neovim, curl, node
-sudo dnf install neovim curl nodejs
+# Neovim, node
+sudo dnf install neovim nodejs
 
 # jupyter + ipykernel
 sudo dnf install python3-pip
@@ -110,8 +112,8 @@ sudo dnf install chromium
 ### Linux - Arch (`pacman`)
 
 ```sh
-# Neovim, curl, node
-sudo pacman -S neovim curl nodejs npm
+# Neovim, node
+sudo pacman -S neovim nodejs npm
 
 # jupyter + ipykernel
 sudo pacman -S python-pip
@@ -162,6 +164,11 @@ This is a Neovim plugin, not a system package - install it the same way regardle
     "IpynbPeekRunAll",
     "IpynbPeekRestartKernel",
     "IpynbPeekInterruptKernel",
+    "IpynbPeekOutline",
+    "IpynbPeekVariables",
+    "IpynbPeekSelectKernel",
+    "IpynbPeekTheme",
+    "IpynbPeekExport",
   },
   config = function()
     require("ipynb-peek").setup({
@@ -186,6 +193,11 @@ use({
     "IpynbPeekRunAll",
     "IpynbPeekRestartKernel",
     "IpynbPeekInterruptKernel",
+    "IpynbPeekOutline",
+    "IpynbPeekVariables",
+    "IpynbPeekSelectKernel",
+    "IpynbPeekTheme",
+    "IpynbPeekExport",
   },
   config = function()
     require("ipynb-peek").setup()
@@ -239,6 +251,18 @@ require("ipynb-peek").setup({
   -- Sign-column icon + "[n] 1.2s" virtual text on each cell's marker line
   -- showing its execution status. Set to false if you find it noisy.
   inline_status = true,
+
+  -- Which browser opens the popup: "auto" (a Chromium-family app-mode window
+  -- if one is installed, else a tab in your default browser), "chromium",
+  -- "firefox" (a separate Firefox instance with its own cached profile - no
+  -- chromeless mode, and popup auto-close is best-effort), or "default"
+  -- (always a tab in your default browser).
+  browser = "auto",
+
+  -- Cell text-objects and motions in notebook buffers (see "Text objects"
+  -- below). `false` disables them all; set a key to `false` to drop just
+  -- that one, e.g. `{ next_cell = false }` to keep Vim's own `]c`.
+  text_objects = {},
 
   -- Preview colors and fonts. `preset` is one of "dark" (default),
   -- "tokyonight", "gruvbox", "rose-pine". `colors` overrides individual
@@ -294,6 +318,36 @@ require("ipynb-peek").setup({
 | `:IpynbPeekNextCodeCell` | Jump to the next code cell, skipping markdown cells |
 | `:IpynbPeekPreviousCodeCell` | Jump to the previous code cell, skipping markdown cells |
 | `:IpynbPeekGotoCell [n]` | Jump straight to cell `n` (1-indexed, matching the cell-number badge in the preview) - prompts for a number if `n` is omitted |
+| `:IpynbPeekOutline` | Floating outline of headings and code cells; `<CR>` jumps to the cell, `/` searches |
+| `:IpynbPeekVariables` | The kernel's variables: name, type, shape, memory, preview (waits for a running cell to finish) |
+| `:IpynbPeekSelectKernel` | Pick another Jupyter kernel; restarts the kernel (state is lost) |
+| `:IpynbPeekTheme [preset]` | Switch the preview palette live: `default` (your `setup()` theme), `dark`, `tokyonight`, `gruvbox`, `rose-pine`, `github-dark`, `github-light` |
+| `:IpynbPeekExport {html\|report\|pdf} [path]` | `html`: standalone report next to the notebook (or at `path`); `report`: same without code; `pdf`: open the preview's print dialog |
+
+## Text objects
+
+Buffer-local in notebook buffers, defined over the `# %%` view:
+
+| Keys | Action |
+| --- | --- |
+| `ic` / `ac` | Inside a cell (body only) / around it (including the `# %%` line) - works with `v`, `y`, `d`, `c`... |
+| `]c` / `[c` | Next cell marker / this cell's marker, then the previous one (falls back to Vim's diff motions in diff windows) |
+| `]e` / `[e` | Next / previous cell whose last run errored |
+
+## Statusline
+
+```lua
+-- lualine
+require("lualine").setup({
+  sections = {
+    lualine_x = {
+      { require("ipynb-peek.statusline").kernel_status, cond = require("ipynb-peek.statusline").is_active },
+    },
+  },
+})
+```
+
+Shows `● python3 (busy: 2.1s)`, `○ python3 (idle)`, or `◌ python3 (not started)` while a preview is open, and nothing otherwise. Any statusline plugin that accepts a function can use `kernel_status` the same way.
 
 ## Default keymaps
 
@@ -320,11 +374,11 @@ Opening a `.ipynb` file with jupytext.vim active converts the buffer into a `# %
 
 One preview may be active at a time. Opening another notebook while one is active is rejected with a clear message; close the current preview first. This prevents kernel, working-directory, cell-status, and persistence state from crossing notebook boundaries.
 
-A Node server handles the HTTP/WebSocket connection to the preview page. Actually running code needs to speak the real Jupyter wire protocol over ZeroMQ to an `ipykernel` process; that connection is owned by a *separate* Node child process (`kernel-bridge.mjs`) rather than folded into the main server, relaying messages over stdio - so a crash while managing kernel execution can never take down the live preview/render/sync path. Two processes, same runtime.
+A Node server handles the HTTP/WebSocket connection to the preview page; Neovim talks to it over the server's stdin/stdout as newline-delimited JSON (commands in, responses and events out), so there is no separate HTTP client. Actually running code needs to speak the real Jupyter wire protocol over ZeroMQ to an `ipykernel` process; that connection is owned by a *separate* Node child process (`kernel-bridge.mjs`) rather than folded into the main server, relaying messages over stdio - so a crash while managing kernel execution can never take down the live preview/render/sync path. Two processes, same runtime.
 
 `server/dist/` (what actually runs) is a prebuilt, committed-to-the-repo bundle - there is no TypeScript or frontend build step on your end. The browser libraries are compiled into that bundle; `zeromq` and `ws` remain runtime dependencies installed by the normal build hook.
 
-**Security.** The server binds to `127.0.0.1` only, and every request that changes state (running/interrupting/restarting the kernel, editing cells) requires a cryptographically random per-session token that Neovim generates and passes to both the server and the preview page. Browser dependencies are bundled locally and the page uses a restrictive Content Security Policy, so it does not grant kernel authority to runtime CDN scripts. Rendered notebook output (rich/HTML cell outputs, Markdown) is inserted into the preview page unsanitized, the same trust model as Jupyter's own browser UI: don't run untrusted notebooks.
+**Security.** The server binds to `127.0.0.1` only, and every request that changes state (running/interrupting/restarting the kernel, editing cells) requires a cryptographically random per-session token that the server generates at startup and hands to Neovim and the preview page. The websocket additionally rejects any connection whose `Origin` header doesn't match the preview's own host, so another website can't open it even if it learned the token. Browser dependencies are bundled locally and the page uses a restrictive Content Security Policy, so it does not grant kernel authority to runtime CDN scripts. Rendered notebook output (rich/HTML cell outputs, Markdown) is inserted into the preview page unsanitized, the same trust model as Jupyter's own browser UI: don't run untrusted notebooks.
 
 ## Troubleshooting
 
@@ -340,7 +394,7 @@ A Node server handles the HTTP/WebSocket connection to the preview page. Actuall
 
 **The preview popup doesn't close when I close the notebook.** This is a best-effort feature and its reliability varies by platform - macOS needs Automation permission granted to your terminal/Neovim (`:checkhealth ipynb-peek` checks this directly and tells you which browser needs it enabled); Linux needs `xdotool` or `wmctrl` installed under X11, or `kdotool` under Wayland (KWin, and wlroots compositors like Sway/Hyprland via wlr-foreign-toplevel-management - `xdotool`/`wmctrl` can't see native-Wayland windows at all); Windows support is newer and less tested. `:checkhealth ipynb-peek` tells you which tool it's looking for based on your session type. The server itself always stops correctly regardless.
 
-**Something's not working and I don't know why.** Run `:checkhealth ipynb-peek` first - this plugin has a larger-than-usual set of external dependencies (jupytext.vim, node, jupyter/ipykernel, a browser, curl), and the health check is the fastest way to find out which one is the problem.
+**Something's not working and I don't know why.** Run `:checkhealth ipynb-peek` first - this plugin has a larger-than-usual set of external dependencies (jupytext.vim, node, jupyter/ipykernel, a browser), and the health check is the fastest way to find out which one is the problem.
 
 **`server/node_modules missing` in `:checkhealth`.** The build step hasn't run. For lazy.nvim, run `:Lazy build ipynb-peek.nvim`; otherwise run the manual install command from [Installation](#installation) above.
 
@@ -357,7 +411,7 @@ make teste2e      # real registered Jupyter kernel + localhost server
 
 `make testlua` vendors a throwaway `plenary.nvim` clone into `.tests/` (gitignored) if one isn't already on your machine, so it works the same locally and in CI. All three suites run on every push/PR via GitHub Actions (`.github/workflows/ci.yml`).
 
-The Lua tests cover `cells.lua`'s buffer parsing directly against real scratch buffers, `status.lua`'s pure icon/virtual-text formatting for the in-buffer status signs, and the cell-jump motions in `init.lua` against real scratch buffers/windows. The server tests cover notebook rendering/identity/sync, iopub handling, persistence, wire framing, authentication, local assets, and the HTTP/WebSocket layer. CI also launches a disposable real ipykernel and verifies the full edit → execute → stream → save → persisted-output workflow. The real browser popup and OS-specific window management remain manual tests.
+The Lua tests cover the session state machine, the cell text-objects and motions, the outline/variables/statusline formatting, the browser drivers' launch commands, `cells.lua`'s buffer parsing directly against real scratch buffers, `status.lua`'s pure icon/virtual-text formatting for the in-buffer status signs, and the cell-jump motions in `init.lua` against real scratch buffers/windows. The server tests cover notebook rendering/identity/sync, the stdio command protocol, session isolation, the websocket origin check, the preview page's store, cell reconciler, outline model, dataframe model, traceback parser and lightbox math, kernel variable inspection against a real kernel, iopub handling, persistence, wire framing, authentication, local assets, and the HTTP/WebSocket layer. CI also launches a disposable real ipykernel and verifies the full edit → execute → stream → save → persisted-output workflow. OS-specific window management remains a manual test.
 
 `server/dist/` is committed to the repo, not generated at install time - after changing anything in `server/src`, run `make build` and commit the result. `make checkbuild` (also run in CI) fails if a rebuild was needed but forgotten. The build also regenerates `server/dist/THIRD_PARTY_NOTICES.txt` for the bundled frontend dependencies.
 

@@ -1,4 +1,11 @@
-import { joinSource, stripAnsi, appendOutput, imageSize, type RenderedCell } from "./notebook"
+import {
+  joinSource,
+  stripAnsi,
+  appendOutput,
+  imageSize,
+  chartOutput,
+  type RenderedCell,
+} from "./notebook"
 
 /**
  * What was actually submitted for execution - captured at /execute time so
@@ -57,7 +64,9 @@ export function applyStreamMessage(cell: RenderedCell, content: any) {
 export function applyResultMessage(cell: RenderedCell, content: any, msgType: string) {
   const data = content.data ?? {}
 
-  if (data["image/png"])
+  const chart = chartOutput(data)
+  if (chart) cell.outputs.push(chart)
+  else if (data["image/png"])
     cell.outputs.push({
       kind: "image",
       mime: "image/png",

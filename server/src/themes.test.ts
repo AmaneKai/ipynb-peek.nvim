@@ -1,5 +1,5 @@
-import { describe, test, expect } from "vitest"
-import { buildThemeCss, PRESETS } from "./themes"
+import { describe, test, it, expect } from "vitest"
+import { buildThemeCss, PRESETS, PRESET_NAMES } from "./themes"
 
 describe("buildThemeCss", () => {
   test("falls back to the dark preset when given undefined", () => {
@@ -48,5 +48,20 @@ describe("buildThemeCss", () => {
   test("omits font lines entirely when no font config is given", () => {
     const css = buildThemeCss(undefined)
     expect(css).not.toContain("--ipynb-font-")
+  })
+})
+
+describe("live theme switching css", () => {
+  it("ships every preset as a data-theme block next to the configured :root", () => {
+    const css = buildThemeCss(JSON.stringify({ preset: "gruvbox", colors: { accent: "#123456" } }))
+    expect(css).toMatch(/^:root \{[^}]*--ipynb-accent: #123456;/)
+    for (const name of PRESET_NAMES) expect(css).toContain(`:root[data-theme="${name}"] {`)
+    expect(css).toContain("--ipynb-bg: #ffffff;")
+  })
+
+  it("marks the light preset with a light color-scheme", () => {
+    const css = buildThemeCss(undefined)
+    const block = css.split(':root[data-theme="github-light"] {')[1].split("}")[0]
+    expect(block).toContain("color-scheme: light;")
   })
 })

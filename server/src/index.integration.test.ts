@@ -383,4 +383,107 @@ describe("auth token", () => {
     })
     ws.close()
   })
+  test("rejects a /ws upgrade from a foreign Origin even with the right token", async () => {
+    const ws = new WebSocket(`${tokenWsUrl}?token=${token}`, { origin: "http://evil.example" })
+    await new Promise<void>((resolve) => {
+      ws.once("error", () => resolve())
+      ws.once("close", () => resolve())
+    })
+    expect(ws.readyState).not.toBe(WebSocket.OPEN)
+  })
+
+  test("accepts a /ws upgrade whose Origin matches the Host", async () => {
+    const ws = new WebSocket(`${tokenWsUrl}?token=${token}`, {
+      origin: `http://127.0.0.1:${tokenServer.port}`,
+    })
+    await new Promise<void>((resolve, reject) => {
+      ws.once("open", () => resolve())
+      ws.once("error", reject)
+    })
+    ws.close()
+  })
+})
+
+describe("session isolation", () => {
+  test("two servers in one process do not share notebook state", async () => {
+    const first = await createServer(0)
+    const second = await createServer(0)
+    try {
+      await first.commands.render(
+        JSON.stringify({
+          nbformat: 4,
+          nbformat_minor: 5,
+          metadata: {},
+          cells: [
+            { cell_type: "code", source: "1", metadata: {}, outputs: [], execution_count: null },
+          ],
+        }),
+      )
+      expect(first.session.cells).toHaveLength(1)
+      expect(second.session.cells).toHaveLength(0)
+    } finally {
+      first.stop(true)
+      second.stop(true)
+    }
+  })
+})
+
+describe("browser -> Neovim navigation events", () => {
+  async function connected() {
+    const server = await createServer(0)
+    await server.commands.render(
+      JSON.stringify({
+        nbformat: 4,
+        nbformat_minor: 5,
+        metadata: {},
+        cells: [
+          { cell_type: "code", source: "1", metadata: {}, outputs: [], execution_count: null },
+          { cell_type: "code", source: "2", metadata: {}, outputs: [], execution_count: null },
+        ],
+      }),
+    )
+    const events: any[] = []
+    server.session.subscribe((line) => events.push(JSON.parse(line)))
+    const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws`)
+    await new Promise<void>((resolve, reject) => {
+      ws.once("open", () => resolve())
+      ws.once("error", reject)
+    })
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 50))
+    return { server, ws, events, settle }
+  }
+
+  test("forwards valid jump, goto and open_file messages", async () => {
+    const { server, ws, events, settle } = await connected()
+    try {
+      ws.send(JSON.stringify({ type: "jump_cell_line", cell_index: 1, line_offset: 3 }))
+      ws.send(JSON.stringify({ type: "goto_cell", index: 0 }))
+      ws.send(JSON.stringify({ type: "open_file", path: "/p/model.py", line: 42 }))
+      await settle()
+      expect(events).toEqual([
+        { type: "jump_cell_line", cell_index: 1, line_offset: 3 },
+        { type: "goto_cell", index: 0 },
+        { type: "open_file", path: "/p/model.py", line: 42 },
+      ])
+    } finally {
+      ws.close()
+      server.stop(true)
+    }
+  })
+
+  test("drops out-of-range or malformed navigation messages", async () => {
+    const { server, ws, events, settle } = await connected()
+    try {
+      ws.send(JSON.stringify({ type: "jump_cell_line", cell_index: 9, line_offset: 1 }))
+      ws.send(JSON.stringify({ type: "jump_cell_line", cell_index: 0, line_offset: 0 }))
+      ws.send(JSON.stringify({ type: "goto_cell", index: -1 }))
+      ws.send(JSON.stringify({ type: "open_file", path: "", line: 1 }))
+      ws.send(JSON.stringify({ type: "open_file", path: "/x.py", line: "1" }))
+      await settle()
+      expect(events).toEqual([])
+    } finally {
+      ws.close()
+      server.stop(true)
+    }
+  })
 })

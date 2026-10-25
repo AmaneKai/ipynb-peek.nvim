@@ -83,6 +83,44 @@ export const PRESETS: Record<string, ThemeColors> = {
     syn_variable: "#ebdbb2",
     syn_type: "#fabd2f",
   },
+  "github-dark": {
+    bg: "#0d1117",
+    fg: "#e6edf3",
+    surface: "#161b22",
+    border: "#30363d",
+    muted: "#7d8590",
+    dim: "#6e7681",
+    accent: "#2f81f7",
+    heading: "#e6edf3",
+    danger: "#da3633",
+    error: "#ff7b72",
+    syn_keyword: "#ff7b72",
+    syn_string: "#a5d6ff",
+    syn_comment: "#8b949e",
+    syn_number: "#79c0ff",
+    syn_function: "#d2a8ff",
+    syn_variable: "#ffa657",
+    syn_type: "#7ee787",
+  },
+  "github-light": {
+    bg: "#ffffff",
+    fg: "#1f2328",
+    surface: "#f6f8fa",
+    border: "#d0d7de",
+    muted: "#656d76",
+    dim: "#8c959f",
+    accent: "#0969da",
+    heading: "#1f2328",
+    danger: "#cf222e",
+    error: "#cf222e",
+    syn_keyword: "#cf222e",
+    syn_string: "#0a3069",
+    syn_comment: "#6e7781",
+    syn_number: "#0550ae",
+    syn_function: "#8250df",
+    syn_variable: "#953800",
+    syn_type: "#116329",
+  },
   "rose-pine": {
     bg: "#191724",
     fg: "#e0def4",
@@ -103,6 +141,11 @@ export const PRESETS: Record<string, ThemeColors> = {
     syn_type: "#ebbcba",
   },
 }
+
+/** Presets whose palette is light, so form controls/scrollbars follow suit. */
+const LIGHT_PRESETS = new Set(["github-light"])
+
+export const PRESET_NAMES = Object.keys(PRESETS)
 
 export interface FontConfig {
   ui?: string
@@ -156,6 +199,7 @@ export function buildThemeCss(rawConfig: string | undefined): string {
   const font: Record<string, string | number> = { ...(config.font ?? {}) }
 
   const lines = [":root {"]
+  lines.push(`  color-scheme: ${LIGHT_PRESETS.has(config.preset ?? "dark") ? "light" : "dark"};`)
   for (const [key, value] of Object.entries(colors)) {
     lines.push(`  ${cssVar("--ipynb-", key)}: ${value};`)
   }
@@ -164,5 +208,18 @@ export function buildThemeCss(rawConfig: string | undefined): string {
     lines.push(`  ${cssVar("--ipynb-font-", key)}: ${cssValue(value)};`)
   }
   lines.push("}")
+
+  // Every preset also ships as a scoped block, so the page can switch palette
+  // live (data-theme on <html>) without a server restart. The plain :root
+  // block above stays the "default": the user's configured preset and
+  // overrides.
+  for (const [name, palette] of Object.entries(PRESETS)) {
+    lines.push(`:root[data-theme="${name}"] {`)
+    lines.push(`  color-scheme: ${LIGHT_PRESETS.has(name) ? "light" : "dark"};`)
+    for (const [key, value] of Object.entries(palette)) {
+      lines.push(`  ${cssVar("--ipynb-", key)}: ${value};`)
+    }
+    lines.push("}")
+  }
   return lines.join("\n")
 }

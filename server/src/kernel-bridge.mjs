@@ -66,9 +66,9 @@ function getFreePort() {
   })
 }
 
-async function findKernelSpec(kernelName, cwd) {
+async function listKernelSpecs(cwd) {
   const jupyterCommand = resolveJupyterCommand(cwd)
-  const specs = await new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) => {
     const kernelspecProcess = spawn(jupyterCommand, ["kernelspec", "list", "--json"])
     let out = ""
     kernelspecProcess.stdout.on("data", (chunk) => (out += chunk))
@@ -82,7 +82,10 @@ async function findKernelSpec(kernelName, cwd) {
       }
     })
   })
+}
 
+async function findKernelSpec(kernelName, cwd) {
+  const specs = await listKernelSpecs(cwd)
   const entry = specs[kernelName]
   if (!entry) {
     const available = Object.keys(specs).sort().join(", ") || "none"
@@ -261,13 +264,17 @@ async function listenIopub() {
   }
 }
 
-async function execute(id, code, allowStdin) {
+/**
+ * `quiet` runs code the user didn't write (variable inspection): it must not
+ * bump the execution counter or land in the kernel's input history.
+ */
+async function execute(id, code, allowStdin, quiet) {
   const frames = buildMessage(
     "execute_request",
     {
       code,
       silent: false,
-      store_history: true,
+      store_history: quiet !== true,
       user_expressions: {},
       allow_stdin: allowStdin === true,
       stop_on_error: true,
@@ -403,8 +410,19 @@ rl.on("line", async (line) => {
   }
   try {
     if (msg.cmd === "start") await start(msg.kernel_name || "python3", msg.cwd)
-    else if (msg.cmd === "execute") await execute(msg.id, msg.code, msg.allow_stdin)
-    else if (msg.cmd === "interrupt") interrupt()
+    else if (msg.cmd === "execute") await execute(msg.id, msg.code, msg.allow_stdin, msg.quiet)
+    else if (msg.cmd === "list_kernels") {
+      const specs = await listKernelSpecs(msg.cwd)
+      emit({
+        type: "kernelspecs",
+        id: msg.id,
+        kernels: Object.entries(specs).map(([name, entry]) => ({
+          name,
+          display_name: entry.spec?.display_name ?? name,
+          language: entry.spec?.language ?? "",
+        })),
+      })
+    } else if (msg.cmd === "interrupt") interrupt()
     else if (msg.cmd === "input_reply") await inputReply(msg.value)
     else if (msg.cmd === "shutdown") {
       kernelProcess?.kill()

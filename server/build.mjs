@@ -31,7 +31,7 @@ await esbuild.build({
 })
 
 await esbuild.build({
-  entryPoints: ["src/client.js"],
+  entryPoints: ["src/client/index.js"],
   bundle: true,
   platform: "browser",
   format: "esm",
@@ -40,17 +40,19 @@ await esbuild.build({
   // Preserve this dynamic import as a browser request; math-renderer.js is
   // bundled separately below so the much larger KaTeX parser stays out of
   // the startup bundle without introducing hash-named shared chunks.
-  external: ["./math-renderer.js"],
+  external: ["./math-renderer.js", "./chart-plotly.js", "./chart-vega.js"],
 })
 
-await esbuild.build({
-  entryPoints: ["src/math-renderer.js"],
-  bundle: true,
-  platform: "browser",
-  format: "esm",
-  minify: true,
-  outfile: "dist/math-renderer.js",
-})
+for (const name of ["math-renderer", "chart-plotly", "chart-vega"]) {
+  await esbuild.build({
+    entryPoints: [`src/client/${name}.js`],
+    bundle: true,
+    platform: "browser",
+    format: "esm",
+    minify: true,
+    outfile: `dist/${name}.js`,
+  })
+}
 
 for (const file of ["kernel-bridge.mjs", "wire-protocol.mjs", "index.html", "style.css"]) {
   cpSync(`src/${file}`, `dist/${file}`)
@@ -76,6 +78,11 @@ const bundledLicenses = [
   ["highlight.js", "highlight.js", "LICENSE", ""],
   ["KaTeX", "katex", "LICENSE", " (including its distributed fonts)"],
   ["marked", "marked", "LICENSE.md", ""],
+  ["Plotly.js", "plotly.js-strict-dist-min", "LICENSE", ""],
+  ["Vega", "vega", "LICENSE", ""],
+  ["Vega-Lite", "vega-lite", "LICENSE", ""],
+  ["Vega-Embed", "vega-embed", "LICENSE", ""],
+  ["Vega-Interpreter", "vega-interpreter", "LICENSE", ""],
 ]
 const notices = bundledLicenses
   .map(([label, packageName, licenseFile, suffix]) => {

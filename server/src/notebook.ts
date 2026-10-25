@@ -11,6 +11,8 @@ export type CellOutput =
   | { kind: "html"; content: string }
   | { kind: "latex"; content: string }
   | { kind: "markdown"; content: string }
+  | { kind: "plotly"; spec: any }
+  | { kind: "vega"; spec: any; lite: boolean }
 
 export type CellMetadata = {
   source_hidden: boolean
@@ -88,8 +90,43 @@ export function imageSize(output: any, mime: string): { width?: number; height?:
   return { width, height }
 }
 
+const PLOTLY_MIME = "application/vnd.plotly.v1+json"
+const VEGA_LITE_MIME = /^application\/vnd\.vegalite\.v\d+\+json$/
+const VEGA_MIME = /^application\/vnd\.vega\.v\d+\+json$/
+
+function parseSpec(value: unknown): any | null {
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value)
+    } catch {
+      return null
+    }
+  }
+  return value !== null && typeof value === "object" ? value : null
+}
+
+/**
+ * Interactive chart bundles (Plotly, Altair/Vega-Lite, Vega). They outrank
+ * image/html alternatives in the same bundle: libraries usually ship a static
+ * fallback next to the spec, and the spec is the better rendering.
+ */
+export function chartOutput(data: Record<string, any>): CellOutput | null {
+  const plotly = parseSpec(data[PLOTLY_MIME])
+  if (plotly) return { kind: "plotly", spec: plotly }
+  for (const mime of Object.keys(data)) {
+    const lite = VEGA_LITE_MIME.test(mime)
+    if (!lite && !VEGA_MIME.test(mime)) continue
+    const spec = parseSpec(data[mime])
+    if (spec) return { kind: "vega", spec, lite }
+  }
+  return null
+}
+
 export function renderOutput(output: any): CellOutput | null {
   const data = output.data ?? {}
+
+  const chart = chartOutput(data)
+  if (chart) return chart
 
   if (data["image/png"])
     return {

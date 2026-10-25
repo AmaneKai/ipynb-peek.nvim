@@ -6,8 +6,9 @@ local client = require("ipynb-peek.client")
 local cells = require("ipynb-peek.cells")
 local browser = require("ipynb-peek.browser")
 local status = require("ipynb-peek.status")
-local active_bufnr = nil
-local open_generation = 0
+local session = require("ipynb-peek.session")
+local runtime = require("ipynb-peek.runtime")
+local textobjects = require("ipynb-peek.textobjects")
 
 --- Resolves the plugin's own install root from where this file was loaded,
 --- so server_dir needs no configuration regardless of which plugin manager
@@ -30,6 +31,11 @@ M.config = {
   window = { width = 900, height = 1000 },
   position = { x = 40, y = 40 },
   inline_status = true,
+  --- Which browser opens the preview popup: "auto" (a Chromium-family app-mode
+  --- window if one is installed, else a tab in your default browser),
+  --- "chromium", "firefox" (separate instance with a plugin-owned profile),
+  --- or "default" (always a tab in your default browser).
+  browser = "auto",
   --- Preview color/font theme. `preset` picks a built-in palette ("dark"
   --- (default), "tokyonight", "gruvbox", "rose-pine"); `colors` overrides
   --- individual tokens from that preset (see README for the full token
@@ -53,6 +59,10 @@ M.config = {
     prev_cell = "<leader>jk",
     goto_cell = "<leader>jg",
   },
+  --- Buffer-local cell text-objects and motions in notebook buffers (see
+  --- textobjects.lua). Set to false to disable, or override/disable single
+  --- keys (e.g. `{ next_cell = false }` to keep Vim's own `]c`).
+  text_objects = {},
 }
 
 local aug = vim.api.nvim_create_augroup("IpynbPeek", { clear = true })
@@ -95,8 +105,8 @@ end
 local function schedule_render(bufnr, delay)
   client.debounce("render", delay == nil and M.config.debounce_ms or delay, function()
     if
-      not server.ready
-      or active_bufnr ~= bufnr
+      not session.is_active()
+      or session.bufnr ~= bufnr
       or not vim.api.nvim_buf_is_valid(bufnr)
     then
       return
@@ -107,8 +117,7 @@ local function schedule_render(bufnr, delay)
     end
     local path = vim.api.nvim_buf_get_name(bufnr)
     local dir = vim.fn.fnamemodify(path, ":h")
-    local headers = { "X-Notebook-Dir: " .. dir, "X-Notebook-Path: " .. path }
-    client.request(server.port, "/render", content, headers, function(decoded)
+    client.request("render", { notebook = content, dir = dir, path = path }, function(decoded)
       if not decoded.ok then
         vim.notify("[ipynb-peek] render error: " .. tostring(decoded.error), vim.log.levels.ERROR)
       end
@@ -139,14 +148,23 @@ local file_watch_timer = nil
 --- anything, corrupting the buffer. So this only ever warns, and only for
 --- the case that actually risks losing something: unsaved edits sitting on
 --- top of a file that just changed underneath them. A clean (unmodified)
---- buffer is left alone entirely - most such events are just this plugin's
---- own execution results being persisted, and warning on every single one
---- would be pure noise with no safe action to suggest anyway.
+--- buffer is left alone entirely. This plugin's own execution-result
+--- persistence is filtered out by the server's persisting/persisted events.
+local persist_in_flight = 0
+local persist_quiet_until = 0
+local PERSIST_QUIET_MS = 1000
+
 local function handle_external_change(bufnr)
-  if active_bufnr ~= bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+  if session.bufnr ~= bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
     return
   end
   if not vim.bo[bufnr].modified then
+    return
+  end
+  -- The server announces its own writes (persisting/persisted events); an fs
+  -- event caused by one of them is not an external change. The quiet window
+  -- covers the watcher's own debounce plus fs-event delivery lag.
+  if persist_in_flight > 0 or uv.now() < persist_quiet_until then
     return
   end
   vim.notify(
@@ -200,15 +218,15 @@ end
 
 --- Live-typing sync (peek.nvim-style): the buffer isn't valid notebook JSON
 --- while jupytext owns it, so this parses cell source directly out of the
---- `# %%` buffer instead of re-POSTing to /render on every keystroke. The
+--- `# %%` buffer instead of re-sending the whole notebook on every keystroke. The
 --- server carries forward outputs/execution state by index regardless of
 --- source changes, so this only ever affects rendered source text, never
 --- clears a cell's last output mid-edit.
 local function schedule_sync(bufnr)
   client.debounce("sync", M.config.sync_debounce_ms, function()
     if
-      not server.ready
-      or active_bufnr ~= bufnr
+      not session.is_active()
+      or session.bufnr ~= bufnr
       or not vim.api.nvim_buf_is_valid(bufnr)
     then
       return
@@ -221,17 +239,11 @@ local function schedule_sync(bufnr)
         source = cells.display_source_from_lines(lines, cell),
       })
     end
-    client.request(
-      server.port,
-      "/sync",
-      vim.json.encode({ cells = live_cells }),
-      nil,
-      function(decoded)
-        if not decoded.ok then
-          vim.notify("[ipynb-peek] sync error: " .. tostring(decoded.error), vim.log.levels.ERROR)
-        end
+    client.request("sync", { cells = live_cells }, function(decoded)
+      if not decoded.ok then
+        vim.notify("[ipynb-peek] sync error: " .. tostring(decoded.error), vim.log.levels.ERROR)
       end
-    )
+    end)
   end)
 end
 
@@ -252,18 +264,18 @@ local function warn_if_unparseable(parsed)
 end
 
 local function require_server_ready()
-  if active_bufnr == nil then
+  if session.state == "idle" then
     vim.notify("[ipynb-peek] no notebook preview is open", vim.log.levels.WARN)
     return false
   end
-  if active_bufnr ~= vim.api.nvim_get_current_buf() then
+  if session.bufnr ~= vim.api.nvim_get_current_buf() then
     vim.notify(
       "[ipynb-peek] this command belongs to the notebook with the active preview",
       vim.log.levels.WARN
     )
     return false
   end
-  if not server.ready then
+  if not session.is_active() then
     vim.notify("[ipynb-peek] server not ready", vim.log.levels.WARN)
     return false
   end
@@ -311,17 +323,11 @@ function M.run_cell(advance)
     return
   end
   local source = cells.source_from_lines(lines, cell)
-  client.request(
-    server.port,
-    "/execute",
-    vim.json.encode({ index = index, code = source }),
-    nil,
-    function(decoded)
-      if not decoded.ok then
-        vim.notify("[ipynb-peek] execute error: " .. tostring(decoded.error), vim.log.levels.ERROR)
-      end
+  client.request("execute", { index = index, code = source }, function(decoded)
+    if not decoded.ok then
+      vim.notify("[ipynb-peek] execute error: " .. tostring(decoded.error), vim.log.levels.ERROR)
     end
-  )
+  end)
   if advance then
     move_cursor_to_cell(bufnr, cells.cell_after(parsed, index))
   end
@@ -456,9 +462,9 @@ function M.jump_to_cell(target)
   end)
 end
 
---- Keyed by 0-based cell index; fulfilled from handle_event_line's
+--- Keyed by 0-based cell index; fulfilled from handle_event's
 --- "cell_status" branch below once that cell's execution actually finishes
---- (status == "idle"), not just when /execute's HTTP response comes back.
+--- (status == "idle"), not just when the execute command's response comes back.
 --- Used by run_all to serialize on real completion - see its own comment
 --- for why that distinction matters.
 local run_all_waiters = {}
@@ -487,8 +493,8 @@ end
 --- Runs every code cell in the buffer, top to bottom, stopping at the first
 --- one that errors (matching real Jupyter/VS Code's default "Run All").
 ---
---- Each cell's /execute is only fired once the previous cell has actually
---- finished - not just once its HTTP response came back. /execute's
+--- Each cell's execute command is only sent once the previous cell has actually
+--- finished - not just once its response came back. The execute
 --- response returns the instant the request is handed to the kernel
 --- bridge (writeToBridge is fire-and-forget, never awaited on the cell
 --- actually completing), so chaining on that alone - as this used to -
@@ -498,7 +504,7 @@ end
 --- looks (and effectively is, from a "can I trust what I'm seeing right
 --- now" standpoint) like everything running at once. Waiting for the
 --- run_all_waiters entry above - fulfilled by a real "idle" cell_status
---- event over /events - fixes that.
+--- event from the server - fixes that.
 function M.run_all()
   if not require_server_ready() then
     return
@@ -533,11 +539,10 @@ function M.run_all()
     end
 
     -- Registered *before* firing the request, not inside its response
-    -- callback: /execute (a one-shot POST) and /events (a separate,
-    -- long-lived curl process) are independent HTTP flows with no
-    -- ordering guarantee between them - a fast enough cell could have its
-    -- "idle" event delivered before /execute's own response arrives.
-    -- Registering first closes that race regardless of which flow wins.
+    -- callback: the execute response and the cell_status events are
+    -- separate messages - a fast enough cell could have its "idle" event
+    -- delivered before the execute response arrives. Registering first
+    -- closes that race regardless of which lands first.
     run_all_waiters[entry.index] = function(status_info)
       if generation ~= run_all_generation then
         return
@@ -552,28 +557,133 @@ function M.run_all()
       run_next(position + 1)
     end
 
-    client.request(
-      server.port,
-      "/execute",
-      vim.json.encode({ index = entry.index, code = entry.source }),
-      nil,
-      function(decoded)
-        if not decoded.ok then
-          if generation == run_all_generation then
-            run_all_waiters[entry.index] = nil -- request never landed, nothing to wait for
-          end
-          vim.notify(
-            "[ipynb-peek] execute error: " .. tostring(decoded.error),
-            vim.log.levels.ERROR
-          )
+    client.request("execute", { index = entry.index, code = entry.source }, function(decoded)
+      if not decoded.ok then
+        if generation == run_all_generation then
+          run_all_waiters[entry.index] = nil -- request never landed, nothing to wait for
         end
-        -- success: don't advance here - the waiter above does that once
-        -- the cell actually finishes.
+        vim.notify("[ipynb-peek] execute error: " .. tostring(decoded.error), vim.log.levels.ERROR)
       end
-    )
+      -- success: don't advance here - the waiter above does that once
+      -- the cell actually finishes.
+    end)
   end
 
   run_next(1)
+end
+
+--- Floating outline of headings and code cells; <CR> jumps to the cell.
+function M.outline()
+  require("ipynb-peek.outline").open()
+end
+
+local THEMES = {
+  "default",
+  "dark",
+  "tokyonight",
+  "gruvbox",
+  "rose-pine",
+  "github-dark",
+  "github-light",
+}
+
+--- Switches the preview's palette live (no restart, no kernel disruption).
+--- `default` returns to the theme from setup().
+function M.set_theme(name)
+  if not require_server_ready() then
+    return
+  end
+  if name == nil or name == "" then
+    vim.ui.select(THEMES, { prompt = "Preview theme" }, function(choice)
+      if choice then
+        M.set_theme(choice)
+      end
+    end)
+    return
+  end
+  client.request("theme", { name = name }, function(decoded)
+    if not decoded.ok then
+      vim.notify("[ipynb-peek] " .. tostring(decoded.error), vim.log.levels.ERROR)
+    end
+  end)
+end
+
+--- Shows the kernel's user variables (name, type, shape, memory, preview).
+function M.variables()
+  if not require_server_ready() then
+    return
+  end
+  vim.notify("[ipynb-peek] reading kernel variables…", vim.log.levels.INFO)
+  client.request("variables", nil, function(decoded)
+    if not decoded.ok then
+      vim.notify("[ipynb-peek] variables: " .. tostring(decoded.error), vim.log.levels.ERROR)
+      return
+    end
+    require("ipynb-peek.variables").show(decoded.variables or {})
+  end)
+end
+
+--- Picks another Jupyter kernel via vim.ui.select (so telescope-ui-select,
+--- fzf-lua and friends take over automatically). Restarts the kernel: its
+--- in-memory state is lost.
+function M.select_kernel()
+  if not require_server_ready() then
+    return
+  end
+  client.request("kernels", nil, function(decoded)
+    if not decoded.ok then
+      vim.notify("[ipynb-peek] kernels: " .. tostring(decoded.error), vim.log.levels.ERROR)
+      return
+    end
+    local kernels = decoded.kernels or {}
+    vim.ui.select(kernels, {
+      prompt = "Jupyter kernel",
+      format_item = function(kernel)
+        local current = kernel.name == decoded.current and "  (current)" or ""
+        return string.format("%s  [%s]%s", kernel.display_name, kernel.name, current)
+      end,
+    }, function(choice)
+      if not choice or choice.name == decoded.current then
+        return
+      end
+      cancel_run_all("kernel was changed")
+      client.request("select_kernel", { name = choice.name }, function(result)
+        if result.ok then
+          vim.notify("[ipynb-peek] kernel set to " .. choice.name, vim.log.levels.INFO)
+        else
+          vim.notify("[ipynb-peek] " .. tostring(result.error), vim.log.levels.ERROR)
+        end
+      end)
+    end)
+  end)
+end
+
+--- `kind`: "html" (standalone report), "report" (same, without code inputs),
+--- or "pdf" (opens the preview's print dialog). `path` defaults to next to
+--- the notebook.
+function M.export(kind, path)
+  if not require_server_ready() then
+    return
+  end
+  if kind == "pdf" then
+    client.request("print", nil, function(decoded)
+      if not decoded.ok then
+        vim.notify("[ipynb-peek] " .. tostring(decoded.error), vim.log.levels.ERROR)
+      end
+    end)
+    return
+  end
+  if kind ~= "html" and kind ~= "report" then
+    vim.notify("[ipynb-peek] export kind must be html, report or pdf", vim.log.levels.ERROR)
+    return
+  end
+  client.request("export", { mode = kind, path = path }, function(decoded)
+    if decoded.ok then
+      vim.notify("[ipynb-peek] exported " .. decoded.path, vim.log.levels.INFO)
+    else
+      vim.notify("[ipynb-peek] export failed: " .. tostring(decoded.error), vim.log.levels.ERROR)
+    end
+  end)
 end
 
 --- Kills the current kernel; the next run request spawns a fresh one.
@@ -585,7 +695,7 @@ function M.restart_kernel()
     return
   end
   cancel_run_all("kernel was restarted")
-  client.request(server.port, "/restart", "{}", nil, function(decoded)
+  client.request("restart", nil, function(decoded)
     if decoded.ok then
       vim.notify("[ipynb-peek] kernel restarted", vim.log.levels.INFO)
     else
@@ -603,7 +713,7 @@ function M.interrupt_kernel()
   if not require_server_ready() then
     return
   end
-  client.request(server.port, "/interrupt", "{}", nil, function(decoded)
+  client.request("interrupt", nil, function(decoded)
     if not decoded.ok then
       vim.notify("[ipynb-peek] interrupt error: " .. tostring(decoded.error), vim.log.levels.ERROR)
     end
@@ -672,21 +782,6 @@ local function delete_cell_at(bufnr, index)
   schedule_sync(bufnr)
 end
 
-local events_job = nil
-local events_should_run = false
---- Reconnect backoff state for start_event_listener - doubles on each
---- attempt that never received a single byte (server not up yet, or down),
---- capped at EVENTS_BACKOFF_MAX_MS, and resets to the base delay the
---- moment a connection actually receives data. Without a cap this retried
---- every 500ms forever in a broken environment (node missing, server
---- crash-looping); this bounds that noise while still recovering on its
---- own once the server comes back.
-local EVENTS_BACKOFF_BASE_MS = 500
-local EVENTS_BACKOFF_MAX_MS = 10000
-local EVENTS_WARN_AFTER_FAILURES = 5
-local events_backoff_ms = EVENTS_BACKOFF_BASE_MS
-local events_consecutive_failures = 0
-
 local status_ns = vim.api.nvim_create_namespace("ipynb-peek-status")
 
 --- Sets (or clears) the sign-column icon + virtual text on the marker line
@@ -740,119 +835,80 @@ local function apply_cells_status(bufnr, cells_status)
   end
 end
 
---- Applies one line of /events output as a buffer edit. Split out of
---- start_event_listener's on_stdout callback purely to keep nesting shallow -
---- this used to be five levels deep inside that callback.
-local function handle_event_line(bufnr, line)
-  if line == "" then
+--- Puts the cursor on line `line_offset` of the cell's source (1 = first
+--- source line), clamped to the cell, in the preview's notebook window.
+local function jump_to_cell_line(bufnr, cell_index, line_offset)
+  if type(cell_index) ~= "number" or type(line_offset) ~= "number" then
     return
   end
-  local ok, decoded = pcall(vim.json.decode, line)
-  if not ok then
-    vim.schedule(function()
-      vim.notify(
-        "[ipynb-peek] received malformed event data: " .. tostring(decoded),
-        vim.log.levels.WARN
-      )
-    end)
+  local parsed = cells.parse(bufnr)
+  local cell = parsed[cell_index + 1]
+  local win = vim.fn.bufwinid(bufnr)
+  if not cell or win == -1 then
     return
   end
-  if not decoded then
+  local target = math.max(cell.start_line + 1, math.min(cell.start_line + line_offset, cell.end_line))
+  target = math.min(target, vim.api.nvim_buf_line_count(bufnr))
+  vim.api.nvim_set_current_win(win)
+  vim.api.nvim_win_set_cursor(win, { target, 0 })
+  vim.cmd("normal! zz")
+end
+
+--- A traceback frame in a real source file: open it, but only if it is an
+--- existing, readable file - the path comes from text printed by the kernel.
+local function open_file_at(path, line)
+  if type(path) ~= "string" or vim.fn.filereadable(path) ~= 1 then
+    vim.notify("[ipynb-peek] can't open " .. tostring(path), vim.log.levels.WARN)
     return
   end
+  vim.cmd("split " .. vim.fn.fnameescape(path))
+  if type(line) == "number" then
+    pcall(vim.api.nvim_win_set_cursor, 0, { math.max(1, line), 0 })
+    vim.cmd("normal! zz")
+  end
+end
+
+--- Applies one server-pushed event (already decoded and running on the main
+--- loop - see server.lua) as a buffer edit.
+local function handle_event(bufnr, decoded)
   if decoded.type == "insert_cell" then
-    vim.schedule(function()
-      insert_cell_at(bufnr, decoded.after_index, decoded.cell_type)
-    end)
+    insert_cell_at(bufnr, decoded.after_index, decoded.cell_type)
   elseif decoded.type == "delete_cell" then
-    vim.schedule(function()
-      delete_cell_at(bufnr, decoded.index)
-    end)
+    delete_cell_at(bufnr, decoded.index)
+  elseif decoded.type == "jump_cell_line" then
+    jump_to_cell_line(bufnr, decoded.cell_index, decoded.line_offset)
+  elseif decoded.type == "goto_cell" then
+    jump_to_cell_line(bufnr, decoded.index, 1)
+  elseif decoded.type == "open_file" then
+    open_file_at(decoded.path, decoded.line)
+  elseif decoded.type == "kernel" then
+    runtime.set_kernel(decoded)
   elseif decoded.type == "cell_status" then
-    vim.schedule(function()
-      apply_cell_status(bufnr, decoded)
-      local waiter = run_all_waiters[decoded.index]
-      if waiter and decoded.status == "idle" then
-        run_all_waiters[decoded.index] = nil
-        waiter(decoded)
-      end
-    end)
+    runtime.set_cell(decoded)
+    apply_cell_status(bufnr, decoded)
+    local waiter = run_all_waiters[decoded.index]
+    if waiter and decoded.status == "idle" then
+      run_all_waiters[decoded.index] = nil
+      waiter(decoded)
+    end
   elseif decoded.type == "cells_status" then
-    vim.schedule(function()
-      apply_cells_status(bufnr, decoded.cells)
-    end)
+    runtime.set_all(decoded.cells)
+    apply_cells_status(bufnr, decoded.cells)
+  elseif decoded.type == "persisting" then
+    persist_in_flight = persist_in_flight + 1
+  elseif decoded.type == "persisted" then
+    persist_in_flight = math.max(0, persist_in_flight - 1)
+    persist_quiet_until = uv.now() + PERSIST_QUIET_MS
   end
 end
 
---- Keeps a persistent connection to the server's /events stream so
---- browser-originated actions (currently just "+ Code"/"+ Markdown") can
---- reach Neovim - the reverse of every other request in this plugin, which
---- are all Neovim POSTing out. The server disables its idle-connection
---- timeout specifically so this can stay open indefinitely, but the
---- connection can still drop for other reasons (server restart, network
---- blip) - auto-reconnect (matching the browser's own websocket
---- reconnect-with-backoff) rather than silently going dead.
-local function start_event_listener(bufnr)
-  events_should_run = true
-  if events_job then
-    return
-  end
-  local got_data = false
-  local url = string.format("http://127.0.0.1:%d/events", server.port)
-  local args = { "curl", "-s", "-N" }
-  if server.token then
-    table.insert(args, "-H")
-    table.insert(args, "X-Ipynb-Peek-Token: " .. server.token)
-  end
-  table.insert(args, url)
-  events_job = vim.fn.jobstart(args, {
-    stdout_buffered = false,
-    on_stdout = function(_, data)
-      for _, line in ipairs(data) do
-        if line ~= "" then
-          got_data = true
-          events_backoff_ms = EVENTS_BACKOFF_BASE_MS
-          events_consecutive_failures = 0
-        end
-        handle_event_line(bufnr, line)
-      end
-    end,
-    on_exit = function()
-      events_job = nil
-      if not events_should_run then
-        return
-      end
-      cancel_run_all("event connection was lost")
-      if not got_data then
-        events_consecutive_failures = events_consecutive_failures + 1
-        if events_consecutive_failures == EVENTS_WARN_AFTER_FAILURES then
-          vim.schedule(function()
-            vim.notify(
-              "[ipynb-peek] still can't reach the preview server after "
-                .. events_consecutive_failures
-                .. ' attempts - actions from the preview (e.g. "+ Code") won\'t reach Neovim '
-                .. "until it recovers. Still retrying in the background.",
-              vim.log.levels.WARN
-            )
-          end)
-        end
-      end
-      local delay = events_backoff_ms
-      events_backoff_ms = math.min(events_backoff_ms * 2, EVENTS_BACKOFF_MAX_MS)
-      vim.defer_fn(function()
-        start_event_listener(bufnr)
-      end, delay)
-    end,
-  })
-end
+local startup_timer = nil
 
-local function stop_event_listener()
-  events_should_run = false
-  events_backoff_ms = EVENTS_BACKOFF_BASE_MS
-  events_consecutive_failures = 0
-  if events_job then
-    vim.fn.jobstop(events_job)
-    events_job = nil
+local function stop_startup_timer()
+  if startup_timer then
+    startup_timer:stop()
+    startup_timer:close()
+    startup_timer = nil
   end
 end
 
@@ -897,6 +953,9 @@ local function apply_keymaps(bufnr)
       vim.keymap.set("n", lhs, action.fn, { buffer = bufnr, desc = action.desc })
     end
   end
+  if M.config.text_objects ~= false then
+    textobjects.apply(bufnr, M.config.text_objects)
+  end
 end
 
 --- Keymaps need to work as soon as you're editing a notebook, not just
@@ -915,7 +974,7 @@ vim.api.nvim_create_autocmd({ "BufEnter", "BufWinEnter" }, {
 
 --- Tracks which buffer the currently-open preview belongs to, so a second
 --- M.open() on that same buffer (fat-fingering :IpynbPeekOpen twice, or
---- triggering it again before the first call's async wait_ready finished)
+--- triggering it again before the server's ready event arrived)
 --- doesn't spawn a second popup window on top of the first - browser.open
 --- has no "only one" guard of its own, it launches a new one unconditionally
 --- every time it's called. Reset to nil in M.close(). There's no reliable
@@ -931,32 +990,86 @@ function M.open()
     vim.notify("[ipynb-peek] the current buffer is not an .ipynb notebook", vim.log.levels.ERROR)
     return
   end
-  if active_bufnr == bufnr then
-    vim.notify(
-      "[ipynb-peek] preview already open for this notebook - "
-        .. ":IpynbPeekClose first if you need to reopen it",
-      vim.log.levels.WARN
-    )
+  local id, reason = session.begin(bufnr)
+  if not id then
+    if reason == "same-buffer" then
+      vim.notify(
+        "[ipynb-peek] preview already open for this notebook - "
+          .. ":IpynbPeekClose first if you need to reopen it",
+        vim.log.levels.WARN
+      )
+    else
+      vim.notify(
+        "[ipynb-peek] a preview is already open for another notebook - "
+          .. "run :IpynbPeekClose there before opening this one",
+        vim.log.levels.ERROR
+      )
+    end
     return
   end
-  if active_bufnr ~= nil then
-    vim.notify(
-      "[ipynb-peek] a preview is already open for another notebook - "
-        .. "run :IpynbPeekClose there before opening this one",
-      vim.log.levels.ERROR
-    )
-    return
-  end
-  active_bufnr = bufnr
-  open_generation = open_generation + 1
-  local generation = open_generation
+  persist_in_flight = 0
+  persist_quiet_until = 0
+  runtime.reset()
   start_file_watcher(bufnr, vim.api.nvim_buf_get_name(bufnr))
 
-  if server.start({ server_dir = M.config.server_dir, theme = M.config.theme }) == false then
-    active_bufnr = nil
-    vim.notify("[ipynb-peek] " .. tostring(server.error), vim.log.levels.ERROR)
+  local function stale()
+    return not session.is_current(id)
+  end
+
+  local function fail_open(message)
+    session.fail(id, message)
+    M.close()
+    vim.notify("[ipynb-peek] " .. message, vim.log.levels.ERROR)
+  end
+
+  --- Everything that needs the server runs from its ready event; the timer
+  --- is only a safety net for a server that never reports one.
+  local function on_ready()
+    if stale() or not session.activate(id) then
+      return
+    end
+    stop_startup_timer()
+    browser.open(server.url, M.config.window, M.config.position, M.config.browser)
+    warn_if_unparseable(cells.parse(bufnr))
+    -- No save/typing burst exists during initial open, so do not spend the
+    -- normal render debounce interval showing an empty popup.
+    schedule_render(bufnr, 0)
+  end
+
+  if
+    server.start({
+      server_dir = M.config.server_dir,
+      theme = M.config.theme,
+      on_ready = on_ready,
+      on_event = function(event)
+        if not stale() then
+          handle_event(bufnr, event)
+        end
+      end,
+      on_exit = function()
+        if stale() then
+          return
+        end
+        if session.is_active() then
+          session.fail(id, server.error)
+          cancel_run_all("preview server exited")
+        else
+          fail_open(server.error)
+        end
+      end,
+    }) == false
+  then
+    fail_open(tostring(server.error))
     return
   end
+  startup_timer = vim.defer_fn(function()
+    startup_timer = nil
+    if not stale() and not session.is_active() then
+      fail_open(
+        "preview server did not become ready within " .. M.config.startup_timeout_ms .. "ms"
+      )
+    end
+  end, M.config.startup_timeout_ms)
 
   --- Without this, calling M.open() again on a buffer that's already had it
   --- called before (close then reopen, or opening twice by accident) piles
@@ -973,8 +1086,8 @@ function M.open()
   local function send_cursor_update()
     client.debounce("cursor", M.config.cursor_debounce_ms, function()
       if
-        not server.ready
-        or active_bufnr ~= bufnr
+        not session.is_active()
+        or session.bufnr ~= bufnr
         or vim.api.nvim_get_current_buf() ~= bufnr
       then
         return
@@ -986,13 +1099,7 @@ function M.open()
         return
       end
       last_cursor_index = index
-      client.request(
-        server.port,
-        "/cursor",
-        vim.json.encode({ index = index }),
-        nil,
-        function() end
-      )
+      client.request("cursor", { index = index })
     end)
   end
 
@@ -1037,7 +1144,10 @@ function M.open()
       local _, cell = cells.cell_index_at(parsed, line)
       if cell and not cell.editable then
         vim.cmd("stopinsert")
-        vim.notify("[ipynb-peek] this cell is marked read-only (editable: false)", vim.log.levels.WARN)
+        vim.notify(
+          "[ipynb-peek] this cell is marked read-only (editable: false)",
+          vim.log.levels.WARN
+        )
       end
     end,
   })
@@ -1051,48 +1161,23 @@ function M.open()
   })
 
   apply_keymaps(bufnr)
-
-  local started_at = uv.now()
-  local function wait_ready()
-    if generation ~= open_generation or active_bufnr ~= bufnr then
-      return
-    end
-    if server.ready then
-      browser.open(server.url, M.config.window, M.config.position)
-      start_event_listener(bufnr)
-      warn_if_unparseable(cells.parse(bufnr))
-      -- No save/typing burst exists during initial open, so do not spend the
-      -- normal render debounce interval showing an empty popup.
-      schedule_render(bufnr, 0)
-      return
-    end
-    if server.error or uv.now() - started_at >= M.config.startup_timeout_ms then
-      local message = server.error
-        or ("preview server did not become ready within " .. M.config.startup_timeout_ms .. "ms")
-      M.close()
-      vim.notify("[ipynb-peek] " .. message, vim.log.levels.ERROR)
-      return
-    end
-    vim.defer_fn(wait_ready, 50)
-  end
-  wait_ready()
 end
 
 function M.close()
-  open_generation = open_generation + 1
   cancel_run_all()
   stop_file_watcher()
   if server.port then
-    browser.close("ipynb-peek:" .. server.port)
+    browser.close("ipynb-peek:" .. server.port, M.config.browser)
   end
-  stop_event_listener()
+  stop_startup_timer()
   client.cancel_debounced()
   server.stop()
-  if active_bufnr and vim.api.nvim_buf_is_valid(active_bufnr) then
-    vim.api.nvim_buf_clear_namespace(active_bufnr, status_ns, 0, -1)
+  local bufnr = session.finish()
+  if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+    vim.api.nvim_buf_clear_namespace(bufnr, status_ns, 0, -1)
   end
-  cells.invalidate(active_bufnr)
-  active_bufnr = nil
+  cells.invalidate(bufnr)
+  runtime.reset()
 end
 
 vim.api.nvim_create_user_command("IpynbPeekOpen", M.open, {})
@@ -1109,6 +1194,26 @@ vim.api.nvim_create_user_command("IpynbPeekRestartKernel", M.restart_kernel, {})
 vim.api.nvim_create_user_command("IpynbPeekInterruptKernel", M.interrupt_kernel, {})
 vim.api.nvim_create_user_command("IpynbPeekNextCodeCell", M.jump_to_next_cell, {})
 vim.api.nvim_create_user_command("IpynbPeekPreviousCodeCell", M.jump_to_previous_cell, {})
+vim.api.nvim_create_user_command("IpynbPeekOutline", M.outline, {})
+vim.api.nvim_create_user_command("IpynbPeekVariables", M.variables, {})
+vim.api.nvim_create_user_command("IpynbPeekSelectKernel", M.select_kernel, {})
+vim.api.nvim_create_user_command("IpynbPeekTheme", function(opts)
+  M.set_theme(opts.args ~= "" and opts.args or nil)
+end, {
+  nargs = "?",
+  complete = function()
+    return THEMES
+  end,
+})
+vim.api.nvim_create_user_command("IpynbPeekExport", function(opts)
+  local kind, path = opts.fargs[1], opts.fargs[2]
+  M.export(kind or "html", path and vim.fn.fnamemodify(path, ":p") or nil)
+end, {
+  nargs = "*",
+  complete = function(_, line)
+    return #vim.split(line, "%s+") <= 2 and { "html", "report", "pdf" } or {}
+  end,
+})
 --- `:IpynbPeekGotoCell 5` jumps straight there; `:IpynbPeekGotoCell` with no
 --- argument falls back to M.jump_to_cell's vim.ui.input prompt.
 vim.api.nvim_create_user_command("IpynbPeekGotoCell", function(opts)
