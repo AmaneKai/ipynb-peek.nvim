@@ -2,33 +2,29 @@ local M = {}
 
 local job_id = nil
 local next_request_id = 0
---- Callbacks for commands sent with M.send that are still waiting for the
---- server's { type = "response", id } line, keyed by that id.
 local pending = {}
---- Partial trailing stdout line carried over between on_stdout callbacks
---- (see :h channel-lines - a line can be split across callbacks).
-local stdout_partial = ""
+local stopping = false
+
 M.port = nil
 M.url = nil
 M.ready = false
 M.error = nil
---- Per-session shared secret the server requires on every state-changing
---- HTTP request and the /ws upgrade (see server/src/index.ts's isAuthorized) -
---- without it, any other page open in the user's browser could drive the
---- kernel just by knowing/scanning the port. The server generates it inside
---- its existing Node process and reports it in its ready event, avoiding a
---- second blocking Node cold start. Neovim itself talks to the server over
---- stdio and never needs to present it.
 M.token = nil
---- The opts.theme actually used to spawn the currently-running server -
---- kept around purely so a second M.start() while one is already running
---- can tell whether the caller's theme differs from what's live, to warn
---- about it (see M.start below).
-local active_theme = nil
-local stopping = false
 
---- Handles one NDJSON line from the server's stdout: the ready handshake,
---- responses to commands sent with M.send, or a pushed event.
+--- Resolves the Python executable to launch `python/server.py`.
+function M.find_python(configured)
+  if type(configured) == "string" and configured ~= "" then
+    return configured
+  end
+  if vim.fn.executable("python3") == 1 then
+    return "python3"
+  end
+  if vim.fn.executable("python") == 1 then
+    return "python"
+  end
+  return nil
+end
+
 local function handle_line(line, opts)
   if line == "" then
     return
@@ -63,52 +59,37 @@ local function handle_line(line, opts)
   end
 end
 
---- Starts the render server (a prebuilt dist/index.js, committed to the
---- repo - see server/build.mjs) if not already running. The server/kernel
---- are both global singletons (see [[README]] "How it works"), so a second
---- call while one is already running reuses it rather than spawning
---- another - if that second call's opts.theme differs from what's actually
---- live, warn rather than silently ignoring it: theme only takes effect at
---- spawn time, so there'd otherwise be no indication the requested
---- colors/fonts never applied.
---- opts.server_dir: absolute path to the `server/` directory (contains package.json).
---- opts.on_ready(): called once, the moment the server's ready event arrives.
---- opts.on_event(event): called (scheduled) for every server-pushed event.
---- opts.on_exit(): called (scheduled) if the server dies without M.stop().
+--- Starts the Python preview/kernel server (`python/server.py`).
+--- opts.server_script: absolute path to `python/server.py`
+--- opts.python: optional Python executable path/name
+--- opts.on_ready(), opts.on_event(event), opts.on_exit()
 function M.start(opts)
   opts = opts or {}
   if job_id then
-    if opts.theme ~= nil and not vim.deep_equal(opts.theme, active_theme) then
-      vim.notify(
-        "[ipynb-peek] server already running for another notebook - this notebook's theme "
-          .. "config is ignored until you :IpynbPeekClose and reopen",
-        vim.log.levels.WARN
-      )
-    end
-    return
+    return true
   end
+
+  local python = M.find_python(opts.python)
+  if not python then
+    M.error = "python3 not found on PATH"
+    return false
+  end
+
   M.port = nil
   M.url = nil
   M.ready = false
   M.error = nil
   M.token = nil
-  stdout_partial = ""
-  active_theme = opts.theme
-
-  local env = { IPYNB_PEEK_PORT = "0" }
-  if opts.theme ~= nil then
-    env.IPYNB_PEEK_THEME = vim.json.encode(opts.theme)
-  end
-
   stopping = false
+
+  local stdout_partial = ""
   local started_job_id
-  started_job_id = vim.fn.jobstart({ "node", "dist/index.js" }, {
-    cwd = opts.server_dir,
-    env = env,
+  started_job_id = vim.fn.jobstart({ python, "-u", opts.server_script }, {
     stdout_buffered = false,
     on_stdout = function(_, data)
-      -- Per :h channel-lines the first element continues the previous
-      -- callback's last (unterminated) line.
+      if job_id ~= started_job_id then
+        return
+      end
       data[1] = stdout_partial .. data[1]
       stdout_partial = table.remove(data)
       for _, line in ipairs(data) do
@@ -116,6 +97,9 @@ function M.start(opts)
       end
     end,
     on_stderr = function(_, data)
+      if job_id ~= started_job_id then
+        return
+      end
       for _, line in ipairs(data) do
         if line ~= "" then
           vim.schedule(function()
@@ -133,6 +117,8 @@ function M.start(opts)
       M.fail_pending("preview server exited")
       M.ready = false
       M.url = nil
+      M.port = nil
+      M.token = nil
       if not stopping then
         M.error = "preview server exited unexpectedly (exit " .. exit_code .. ")"
         if was_ready then
@@ -147,7 +133,8 @@ function M.start(opts)
     end,
   })
   if started_job_id <= 0 then
-    M.error = "failed to start Node preview server (jobstart returned " .. started_job_id .. ")"
+    M.error = "failed to start Python preview server (jobstart returned " .. started_job_id .. ")"
+    M.port = nil
     M.token = nil
     return false
   end
@@ -155,10 +142,6 @@ function M.start(opts)
   return true
 end
 
---- Sends one command to the server over stdin as an NDJSON line. `fields`
---- is merged with the command `type`; `on_result` (optional) receives the
---- server's { ok, error? } response, scheduled onto the main loop. Returns
---- false (after warning) if no server is running.
 function M.send(command_type, fields, on_result)
   if not job_id or not M.ready then
     vim.notify("[ipynb-peek] server not running", vim.log.levels.WARN)
@@ -181,8 +164,6 @@ function M.send(command_type, fields, on_result)
   return true
 end
 
---- Resolves every outstanding M.send callback with a failure, so callers
---- waiting on a response (e.g. run-all) don't hang on a dead server.
 function M.fail_pending(reason)
   local callbacks = pending
   pending = {}
@@ -197,6 +178,7 @@ function M.stop()
   stopping = true
   M.fail_pending("preview server stopped")
   if job_id then
+    pcall(vim.fn.chanclose, job_id, "stdin")
     vim.fn.jobstop(job_id)
     job_id = nil
     M.ready = false
@@ -205,7 +187,6 @@ function M.stop()
   M.port = nil
   M.token = nil
   M.error = nil
-  active_theme = nil
 end
 
 return M

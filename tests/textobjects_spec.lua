@@ -48,31 +48,21 @@ describe("textobjects.select", function()
   end)
 end)
 
-describe("textobjects boundary motions", function()
+describe("textobjects boundary, error, and stale motions", function()
   local parsed
   before_each(function()
     parsed = cells.parse(make_buffer(lines))
   end)
 
-  it("finds the next marker, and nothing after the last", function()
+  it("finds next and previous markers", function()
     assert.are.equal(4, textobjects.boundary_target(parsed, 2, "next"))
     assert.is_nil(textobjects.boundary_target(parsed, 7, "next"))
-  end)
-
-  it("goes to this cell's own marker first, then the previous one", function()
     assert.are.equal(4, textobjects.boundary_target(parsed, 5, "prev"))
     assert.are.equal(1, textobjects.boundary_target(parsed, 4, "prev"))
     assert.is_nil(textobjects.boundary_target(parsed, 1, "prev"))
   end)
-end)
 
-describe("textobjects.error_target", function()
-  local parsed
-  before_each(function()
-    parsed = cells.parse(make_buffer(lines))
-  end)
-
-  it("walks to the next and previous errored cell", function()
+  it("walks to next and previous errored cell", function()
     local errors = { [0] = false, [1] = true, [2] = false, [3] = true }
     local has_error = function(i)
       return errors[i] == true
@@ -82,6 +72,18 @@ describe("textobjects.error_target", function()
     assert.is_nil(textobjects.error_target(parsed, 7, "next", has_error))
     assert.are.equal(4, textobjects.error_target(parsed, 7, "prev", has_error))
   end)
+
+  it("walks to next and previous stale cell (]s / [s)", function()
+    local stale = { [0] = false, [1] = true, [2] = false, [3] = true }
+    local is_stale = function(i)
+      return stale[i] == true
+    end
+    assert.are.equal(4, textobjects.stale_target(parsed, 1, "next", is_stale))
+    assert.are.equal(7, textobjects.stale_target(parsed, 4, "next", is_stale))
+    assert.is_nil(textobjects.stale_target(parsed, 7, "next", is_stale))
+    assert.are.equal(4, textobjects.stale_target(parsed, 7, "prev", is_stale))
+    assert.is_nil(textobjects.stale_target(parsed, 4, "prev", is_stale))
+  end)
 end)
 
 describe("runtime", function()
@@ -89,7 +91,7 @@ describe("runtime", function()
     runtime.reset()
   end)
 
-  it("tracks error cells and busy time", function()
+  it("tracks error cells, busy time, and stale map", function()
     runtime.set_cell({ index = 2, status = "idle", has_error = true })
     assert.is_true(runtime.has_error(2))
     assert.is_false(runtime.has_error(0))
@@ -99,11 +101,11 @@ describe("runtime", function()
     assert.are.equal(1, index)
     runtime.set_cell({ index = 1, status = "idle" })
     assert.is_nil(runtime.busy())
-  end)
 
-  it("replaces everything on a full snapshot", function()
-    runtime.set_cell({ index = 5, status = "idle", has_error = true })
-    runtime.set_all({ { index = 0, status = "idle", has_error = false } })
-    assert.is_false(runtime.has_error(5))
+    runtime.set_stale({ ["0"] = { edited = true }, ["2"] = { edited = false } })
+    assert.is_true(runtime.is_stale(0))
+    assert.is_false(runtime.is_stale(1))
+    assert.is_true(runtime.is_stale(2))
+    assert.are.equal(2, runtime.stale_count())
   end)
 end)

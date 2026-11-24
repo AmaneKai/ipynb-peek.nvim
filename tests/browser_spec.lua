@@ -1,57 +1,53 @@
 local browser = require("ipynb-peek.browser")
-local chromium = require("ipynb-peek.browser.drivers.chromium")
-local firefox = require("ipynb-peek.browser.drivers.firefox")
 
-local window = { width = 900, height = 1000 }
-local position = { x = 40, y = 50 }
-
-describe("chromium driver command", function()
-  it("opens an app-mode window via `open -na` on macOS", function()
-    local cmd = chromium.command(
-      { os = "mac", name = "Google Chrome" },
-      "http://127.0.0.1:1/",
-      window,
-      position
-    )
-    assert.are.same({
-      "open",
-      "-na",
-      "Google Chrome",
-      "--args",
-      "--app=http://127.0.0.1:1/",
-      "--window-size=900,1000",
-      "--window-position=40,50",
-    }, cmd)
+describe("browser.command", function()
+  it("appends url to a custom browser command table without mutating input", function()
+    local pref = { "surf", "-z", "1.2" }
+    local cmd = browser.command("http://127.0.0.1:9999/?token=abc", pref)
+    assert.are.same({ "surf", "-z", "1.2", "http://127.0.0.1:9999/?token=abc" }, cmd)
+    assert.are.same({ "surf", "-z", "1.2" }, pref)
   end)
 
-  it("execs the binary directly elsewhere", function()
-    local cmd =
-      chromium.command({ os = "linux", binary = "chromium" }, "http://x/", window, position)
-    assert.are.equal("chromium", cmd[1])
-    assert.are.equal("--app=http://x/", cmd[2])
+  it("returns nil for default or false preference", function()
+    assert.is_nil(browser.command("http://127.0.0.1:1/", "default"))
+    assert.is_nil(browser.command("http://127.0.0.1:1/", false))
+    assert.is_nil(browser.command("http://127.0.0.1:1/", nil))
   end)
 end)
 
-describe("firefox driver command", function()
-  it("uses an isolated profile and a separate instance", function()
-    local cmd = firefox.command({ os = "linux", binary = "firefox" }, "http://x/", window, "/p")
-    assert.are.same({
-      "firefox",
-      "--no-remote",
-      "--profile",
-      "/p",
-      "--width",
-      "900",
-      "--height",
-      "1000",
-      "--new-window",
-      "http://x/",
-    }, cmd)
-  end)
-end)
+describe("browser.open", function()
+  it("notifies the URL and does not call vim.ui.open when browser = false", function()
+    local notified = {}
+    local opened = false
+    local orig_notify = vim.notify
+    local orig_open = vim.ui.open
+    vim.notify = function(msg)
+      table.insert(notified, msg)
+    end
+    vim.ui.open = function()
+      opened = true
+    end
 
-describe("browser.find", function()
-  it("returns nil for the `default` preference", function()
-    assert.is_nil(browser.find("default"))
+    browser.open("http://127.0.0.1:1234/?token=tok", false)
+
+    vim.notify = orig_notify
+    vim.ui.open = orig_open
+
+    assert.is_false(opened)
+    assert.are.equal(1, #notified)
+    assert.is_truthy(notified[1]:find("http://127.0.0.1:1234/?token=tok", 1, true))
+  end)
+
+  it("uses vim.ui.open when browser = 'default'", function()
+    local opened_url = nil
+    local orig_open = vim.ui.open
+    vim.ui.open = function(url)
+      opened_url = url
+    end
+
+    browser.open("http://127.0.0.1:1234/?token=tok", "default")
+    vim.ui.open = orig_open
+
+    assert.are.equal("http://127.0.0.1:1234/?token=tok", opened_url)
   end)
 end)

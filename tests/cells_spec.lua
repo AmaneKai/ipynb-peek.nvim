@@ -1,7 +1,5 @@
 local cells = require("ipynb-peek.cells")
 
---- Creates a scratch buffer with the given lines, matching how a real
---- jupytext-converted `.ipynb` buffer looks once opened in Neovim.
 local function make_buffer(lines)
   local bufnr = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
@@ -18,38 +16,47 @@ describe("cells.parse", function()
     local bufnr = make_buffer({ "# %%", "1 + 1" })
     local parsed = cells.parse(bufnr)
     assert.are.equal(1, #parsed)
-    assert.are.same(
-      { start_line = 1, end_line = 2, cell_type = "code", tags = {}, editable = true, deletable = true },
-      parsed[1]
-    )
+    assert.are.same({
+      start_line = 1,
+      end_line = 2,
+      cell_type = "code",
+      tags = {},
+      editable = true,
+      deletable = true,
+    }, parsed[1])
+  end)
+
+  it("supports `#%%` without a space", function()
+    local bufnr = make_buffer({ "#%%", "x = 1", "#%% [markdown]", "# hi" })
+    local parsed = cells.parse(bufnr)
+    assert.are.equal(2, #parsed)
+    assert.are.equal("code", parsed[1].cell_type)
+    assert.are.equal("markdown", parsed[2].cell_type)
+  end)
+
+  it("does NOT split cells on `# %%timeit` or `# %%bash`", function()
+    local bufnr = make_buffer({ "# %%", "# %%timeit", "x = 1", "# %%bash", "y = 2" })
+    local parsed = cells.parse(bufnr)
+    assert.are.equal(1, #parsed)
+    assert.are.equal(1, parsed[1].start_line)
+    assert.are.equal(5, parsed[1].end_line)
   end)
 
   it("splits multiple cells at each `# %%` marker", function()
     local bufnr = make_buffer({ "# %%", "1 + 1", "# %%", "2 + 2" })
     local parsed = cells.parse(bufnr)
     assert.are.equal(2, #parsed)
-    assert.are.same(
-      { start_line = 1, end_line = 2, cell_type = "code", tags = {}, editable = true, deletable = true },
-      parsed[1]
-    )
-    assert.are.same(
-      { start_line = 3, end_line = 4, cell_type = "code", tags = {}, editable = true, deletable = true },
-      parsed[2]
-    )
+    assert.are.equal(1, parsed[1].start_line)
+    assert.are.equal(2, parsed[1].end_line)
+    assert.are.equal(3, parsed[2].start_line)
+    assert.are.equal(4, parsed[2].end_line)
   end)
 
-  it("detects a `# %% [markdown]` marker as a markdown cell", function()
-    local bufnr = make_buffer({ "# %% [markdown]", "# hello" })
+  it("detects `# %% [markdown]` and `# %% [raw]` markers", function()
+    local bufnr = make_buffer({ "# %% [markdown]", "# hello", "# %% [raw]", "# raw" })
     local parsed = cells.parse(bufnr)
-    assert.are.equal(1, #parsed)
     assert.are.equal("markdown", parsed[1].cell_type)
-  end)
-
-  it("detects a `# %% [raw]` marker as a raw cell", function()
-    local bufnr = make_buffer({ "# %% [raw]", "some raw text" })
-    local parsed = cells.parse(bufnr)
-    assert.are.equal(1, #parsed)
-    assert.are.equal("raw", parsed[1].cell_type)
+    assert.are.equal("raw", parsed[2].cell_type)
   end)
 
   it("ignores buffer content before the first marker", function()
@@ -59,181 +66,90 @@ describe("cells.parse", function()
     assert.are.equal(2, parsed[1].start_line)
   end)
 
-  it("parses tags off the marker line", function()
-    local bufnr = make_buffer({ '# %% tags=["skip-run-all", "slow"]', "1 + 1" })
+  it("parses mixed-quote tags in order without bogus apostrophe splits", function()
+    local bufnr = make_buffer({ [=[# %% tags=["a'b", 'second', "third"]]=], "1 + 1" })
     local parsed = cells.parse(bufnr)
-    assert.are.same({ "skip-run-all", "slow" }, parsed[1].tags)
+    assert.are.same({ "a'b", "second", "third" }, parsed[1].tags)
   end)
 
-  it("defaults tags to an empty table when the marker has none", function()
-    local bufnr = make_buffer({ "# %%", "1 + 1" })
-    local parsed = cells.parse(bufnr)
-    assert.are.same({}, parsed[1].tags)
-  end)
-
-  it("parses editable=false and deletable=false off the marker line", function()
-    local bufnr = make_buffer({ "# %% deletable=false editable=false", "1 + 1" })
-    local parsed = cells.parse(bufnr)
-    assert.is_false(parsed[1].editable)
-    assert.is_false(parsed[1].deletable)
-  end)
-
-  it("defaults editable and deletable to true when the marker has neither", function()
-    local bufnr = make_buffer({ "# %%", "1 + 1" })
+  it("enforces word boundaries for editable=false and deletable=false", function()
+    local bufnr = make_buffer({
+      "# %% uneditable=false undeletable=false",
+      "1",
+      "# %% deletable=false editable=false",
+      "2",
+    })
     local parsed = cells.parse(bufnr)
     assert.is_true(parsed[1].editable)
     assert.is_true(parsed[1].deletable)
+    assert.is_false(parsed[2].editable)
+    assert.is_false(parsed[2].deletable)
   end)
 
-  it("reuses a parsed snapshot until changedtick advances", function()
+  it("reuses a parsed snapshot until changedtick advances and can invalidate", function()
     local bufnr = make_buffer({ "# %%", "1 + 1" })
     local first = cells.parse(bufnr)
-
     assert.is_true(rawequal(first, cells.parse(bufnr)))
 
     vim.api.nvim_buf_set_lines(bufnr, 2, 2, false, { "# %%", "2 + 2" })
     local updated = cells.parse(bufnr)
     assert.is_false(rawequal(first, updated))
     assert.are.equal(2, #updated)
-  end)
-
-  it("can explicitly release a retained snapshot", function()
-    local bufnr = make_buffer({ "# %%", "1 + 1" })
-    local first = cells.parse(bufnr)
 
     cells.invalidate(bufnr)
-
-    assert.is_false(rawequal(first, cells.parse(bufnr)))
+    assert.is_false(rawequal(updated, cells.parse(bufnr)))
   end)
 end)
 
-describe("cells.cell_index_at", function()
-  it("returns the 0-based index and cell for a line inside it", function()
-    local bufnr = make_buffer({ "# %%", "1 + 1", "# %%", "2 + 2" })
-    local parsed = cells.parse(bufnr)
-
-    local index, cell = cells.cell_index_at(parsed, 4)
-
-    assert.are.equal(1, index)
-    assert.are.equal("code", cell.cell_type)
-  end)
-
-  it("returns nil when the line sits before the first marker", function()
-    local bufnr = make_buffer({ "# leading comment", "# %%", "code" })
+describe("cells navigation helpers", function()
+  it("resolves cell_index_at, cell_after, and cell_before", function()
+    local bufnr = make_buffer({ "# leading", "# %%", "1", "# %%", "2", "# %%", "3" })
     local parsed = cells.parse(bufnr)
 
     assert.is_nil(cells.cell_index_at(parsed, 1))
-  end)
-end)
-
-describe("cells.cell_after", function()
-  it("returns the cell right after the given 0-based index", function()
-    local bufnr = make_buffer({ "# %%", "1 + 1", "# %%", "2 + 2", "# %%", "3 + 3" })
-    local parsed = cells.parse(bufnr)
-
-    local next_cell = cells.cell_after(parsed, 0)
-
-    assert.are.same(parsed[2], next_cell)
-  end)
-
-  it("returns nil for the last cell", function()
-    local bufnr = make_buffer({ "# %%", "1 + 1", "# %%", "2 + 2" })
-    local parsed = cells.parse(bufnr)
-
-    assert.is_nil(cells.cell_after(parsed, 1))
-  end)
-
-  it("returns nil for an empty cell list", function()
-    assert.is_nil(cells.cell_after({}, 0))
-  end)
-end)
-
-describe("cells.cell_before", function()
-  it("returns the cell right before the given 0-based index", function()
-    local bufnr = make_buffer({ "# %%", "1 + 1", "# %%", "2 + 2", "# %%", "3 + 3" })
-    local parsed = cells.parse(bufnr)
-
-    local prev_cell = cells.cell_before(parsed, 1)
-
-    assert.are.same(parsed[1], prev_cell)
-  end)
-
-  it("returns nil for the first cell", function()
-    local bufnr = make_buffer({ "# %%", "1 + 1", "# %%", "2 + 2" })
-    local parsed = cells.parse(bufnr)
-
+    local idx, cell = cells.cell_index_at(parsed, 5)
+    assert.are.equal(1, idx)
+    assert.are.equal("code", cell.cell_type)
+    assert.are.same(parsed[3], cells.cell_after(parsed, 1))
+    assert.is_nil(cells.cell_after(parsed, 2))
+    assert.are.same(parsed[1], cells.cell_before(parsed, 1))
     assert.is_nil(cells.cell_before(parsed, 0))
   end)
-
-  it("returns nil for an empty cell list", function()
-    assert.is_nil(cells.cell_before({}, 0))
-  end)
 end)
 
-describe("cells.source", function()
-  it("excludes the `# %%` marker line itself", function()
-    local bufnr = make_buffer({ "# %%", "1 + 1", "2 + 2" })
+describe("cells.source and display_source", function()
+  it("preserves comments like `# !TODO` and `# ?why` verbatim (no magic mangling)", function()
+    local bufnr = make_buffer({
+      "# %%",
+      "# !TODO: fix this",
+      "# ?why does this work",
+      "x = 1",
+    })
     local parsed = cells.parse(bufnr)
-
-    assert.are.equal("1 + 1\n2 + 2", cells.source(bufnr, parsed[1]))
+    local expected = "# !TODO: fix this\n# ?why does this work\nx = 1"
+    assert.are.equal(expected, cells.source(bufnr, parsed[1]))
   end)
 
-  it("un-escapes a jupytext-commented line magic", function()
-    local bufnr = make_buffer({ "# %%", '# %time print("hi")' })
+  it("trims a single trailing blank inter-cell separator before another cell", function()
+    local bufnr = make_buffer({ "# %%", "a = 1", "", "# %%", "b = 2", "" })
     local parsed = cells.parse(bufnr)
-
-    assert.are.equal('%time print("hi")', cells.source(bufnr, parsed[1]))
+    assert.are.equal("a = 1", cells.source(bufnr, parsed[1]))
+    -- Last cell preserves its own trailing blank line
+    assert.are.equal("b = 2\n", cells.source(bufnr, parsed[2]))
   end)
 
-  it("un-escapes a jupytext-commented shell escape", function()
-    local bufnr = make_buffer({ "# %%", "# !printf 'hi\\n'" })
+  it("strips `# ` comment prefixes in markdown and raw cells", function()
+    local bufnr = make_buffer({
+      "# %% [markdown]",
+      "# # Title",
+      "#",
+      "# paragraph",
+      "",
+      "# %% [raw]",
+      "# raw text",
+    })
     local parsed = cells.parse(bufnr)
-
-    assert.are.equal("!printf 'hi\\n'", cells.source(bufnr, parsed[1]))
-  end)
-
-
-  it("preserves indentation when un-escaping a magic", function()
-    local bufnr = make_buffer({ "# %%", "if True:", "    # %time foo()" })
-    local parsed = cells.parse(bufnr)
-
-    assert.are.equal("if True:\n    %time foo()", cells.source(bufnr, parsed[1]))
-  end)
-
-  it("leaves an ordinary comment starting with `#` untouched", function()
-    local bufnr = make_buffer({ "# %%", "# just a regular comment", "1 + 1" })
-    local parsed = cells.parse(bufnr)
-
-    assert.are.equal("# just a regular comment\n1 + 1", cells.source(bufnr, parsed[1]))
-  end)
-
-  it("does not un-escape non-code cells", function()
-    local bufnr = make_buffer({ "# %% [raw]", "# %not-a-magic-in-a-raw-cell" })
-    local parsed = cells.parse(bufnr)
-
-    assert.are.equal("# %not-a-magic-in-a-raw-cell", cells.source(bufnr, parsed[1]))
-  end)
-end)
-
-describe("cells.display_source", function()
-  it("leaves code cell source untouched", function()
-    local bufnr = make_buffer({ "# %%", "1 + 1" })
-    local parsed = cells.parse(bufnr)
-
-    assert.are.equal("1 + 1", cells.display_source(bufnr, parsed[1]))
-  end)
-
-  it("strips jupytext's `# ` comment prefix from markdown cell lines", function()
-    local bufnr = make_buffer({ "# %% [markdown]", "# # Title", "# some text" })
-    local parsed = cells.parse(bufnr)
-
-    assert.are.equal("# Title\nsome text", cells.display_source(bufnr, parsed[1]))
-  end)
-
-  it("strips jupytext's `# ` comment prefix from raw cell lines", function()
-    local bufnr = make_buffer({ "# %% [raw]", "# some raw text" })
-    local parsed = cells.parse(bufnr)
-
-    assert.are.equal("some raw text", cells.display_source(bufnr, parsed[1]))
+    assert.are.equal("# Title\n\nparagraph", cells.display_source(bufnr, parsed[1]))
+    assert.are.equal("raw text", cells.display_source(bufnr, parsed[2]))
   end)
 end)

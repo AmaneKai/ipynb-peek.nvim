@@ -1,68 +1,94 @@
 local M = {}
 
---- The same buffer version is commonly inspected several times in one UI
---- event: parse the cell boundaries, then extract every cell's source, then
---- apply a status snapshot. Keep one immutable snapshot for the most recently
---- inspected buffer so those operations share a single nvim_buf_get_lines()
---- call. changedtick invalidates it automatically on the next real edit;
---- extmark/status updates do not change changedtick, so they can safely reuse
---- the parsed boundaries too.
 local cached_bufnr = nil
 local cached_changedtick = nil
 local cached_cells = nil
 local cached_lines = nil
 
---- Extracts a jupytext percent-format marker line's `tags=[...]` metadata
---- (e.g. `# %% tags=["skip-run-all"]`), if present. Only `tags` is parsed -
---- jupytext's marker-line metadata syntax supports arbitrary key/value
---- pairs, but tags is the only one anything in this plugin currently acts
---- on (see M.run_all's skip-run-all check).
+--- Scans one quoted token starting at `start_idx` in `list`.
+--- Returns (token_or_nil, next_index).
+local function scan_quoted_token(list, start_idx)
+  local quote = list:sub(start_idx, start_idx)
+  local j, len = start_idx + 1, #list
+  local buf = {}
+  while j <= len do
+    local ch = list:sub(j, j)
+    if ch == "\\" and j < len then
+      table.insert(buf, list:sub(j + 1, j + 1))
+      j = j + 2
+    elseif ch == quote then
+      return table.concat(buf), j + 1
+    else
+      table.insert(buf, ch)
+      j = j + 1
+    end
+  end
+  return nil, len + 1
+end
+
+--- Scans quoted tag strings inside `tags=[...]` in a single pass so mixed
+--- quotes and embedded apostrophes/quotes preserve exact order and values.
 local function parse_tags(line)
   local tags = {}
   local list = line:match("tags%s*=%s*%[(.-)%]")
   if not list then
     return tags
   end
-  for tag in list:gmatch('"([^"]*)"') do
-    table.insert(tags, tag)
-  end
-  for tag in list:gmatch("'([^']*)'") do
-    table.insert(tags, tag)
+  local i, len = 1, #list
+  while i <= len do
+    local ch = list:sub(i, i)
+    if ch == '"' or ch == "'" then
+      local tok, next_i = scan_quoted_token(list, i)
+      if tok ~= nil then
+        table.insert(tags, tok)
+      end
+      i = next_i
+    else
+      i = i + 1
+    end
   end
   return tags
 end
 
---- Extracts a jupytext percent-format marker line's `editable=false` (or
---- `deletable=false`) attribute, if present - jupytext round-trips both
---- straight from nbformat's cell.metadata onto the marker line, the same
---- convention as tags=[...] above (verified directly against jupytext's
---- own ipynb->py:percent conversion). Absent entirely means true, matching
---- nbformat's own "unset means editable/deletable" convention.
+--- Extracts a marker-line boolean attribute (`editable=false` / `deletable=false`)
+--- with strict word boundaries so `uneditable=false` does not match `editable=false`.
 local function parse_bool_attr(line, name)
-  return line:match(name .. "%s*=%s*false") == nil
+  return line:match("%f[%w_]" .. name .. "%s*=%s*false%f[^%w_]") == nil
 end
 
-local function parse_lines(lines)
+--- Matches `# %%` or `#%%` only when followed by end-of-line or whitespace,
+--- so IPython cell magics like `# %%timeit` or `# %%bash` do NOT split cells.
+local function match_marker(line)
+  if line:match("^# ?%%%%$") then
+    return ""
+  end
+  return line:match("^# ?%%%%(%s.*)$")
+end
+
+--- Pure line-array parser (no buffer required). Returns an array of
+--- { start_line, end_line, cell_type, tags, editable, deletable } (1-based inclusive).
+function M.parse_lines(lines)
   local parsed = {}
   local current = nil
+  if type(lines) ~= "table" then
+    return parsed
+  end
 
   for line_number, line in ipairs(lines) do
-    local is_markdown = line:match("^# %%%%%s*%[markdown%]") ~= nil
-    local is_raw = line:match("^# %%%%%s*%[raw%]") ~= nil
-    local is_marker = is_markdown or is_raw or line:match("^# %%%%") ~= nil
-
-    if is_marker then
+    local rest = type(line) == "string" and match_marker(line) or nil
+    if rest ~= nil then
       if current then
         current.end_line = line_number - 1
         table.insert(parsed, current)
       end
-      local cell_type = is_markdown and "markdown" or (is_raw and "raw" or "code")
+      local is_md = rest:match("^%s*%[markdown%]") ~= nil
+      local is_raw = rest:match("^%s*%[raw%]") ~= nil
       current = {
         start_line = line_number,
-        cell_type = cell_type,
-        tags = parse_tags(line),
-        editable = parse_bool_attr(line, "editable"),
-        deletable = parse_bool_attr(line, "deletable"),
+        cell_type = is_md and "markdown" or (is_raw and "raw" or "code"),
+        tags = parse_tags(rest),
+        editable = parse_bool_attr(rest, "editable"),
+        deletable = parse_bool_attr(rest, "deletable"),
       }
     end
   end
@@ -75,10 +101,6 @@ local function parse_lines(lines)
   return parsed
 end
 
---- Returns both the parsed cells and the exact buffer lines they were parsed
---- from. Callers rebuilding source for several cells should use this once and
---- pass `lines` to source_from_lines/display_source_from_lines instead of
---- crossing the Neovim API once per cell.
 function M.snapshot(bufnr)
   local changedtick = vim.api.nvim_buf_get_changedtick(bufnr)
   if bufnr == cached_bufnr and changedtick == cached_changedtick then
@@ -86,7 +108,7 @@ function M.snapshot(bufnr)
   end
 
   local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-  local parsed = parse_lines(lines)
+  local parsed = M.parse_lines(lines)
   cached_bufnr = bufnr
   cached_changedtick = changedtick
   cached_cells = parsed
@@ -94,8 +116,6 @@ function M.snapshot(bufnr)
   return parsed, lines
 end
 
---- Releases the retained source snapshot once its notebook closes. Passing no
---- buffer clears it unconditionally; passing a different buffer is a no-op.
 function M.invalidate(bufnr)
   if bufnr ~= nil and bufnr ~= cached_bufnr then
     return
@@ -106,18 +126,11 @@ function M.invalidate(bufnr)
   cached_lines = nil
 end
 
---- Parses a jupytext "light" format buffer (`# %%`-delimited) into cells.
---- Returns an array of { start_line, end_line, cell_type, tags, editable,
---- deletable }, both 1-indexed and inclusive, where start_line is the
---- marker line itself.
 function M.parse(bufnr)
   local parsed = M.snapshot(bufnr)
   return parsed
 end
 
---- Returns the 0-based index (matching ipynb cell order) of the cell
---- containing `line` (1-indexed) plus the cell itself, or nil if the
---- cursor sits before the first `# %%` marker.
 function M.cell_index_at(parsed, line)
   for position, cell in ipairs(parsed) do
     if line >= cell.start_line and line <= cell.end_line then
@@ -127,78 +140,70 @@ function M.cell_index_at(parsed, line)
   return nil
 end
 
---- Returns the cell right after the 0-based `index` (matching cell_index_at's
---- convention), or nil if `index` refers to the last cell. Used to find
---- where to land the cursor after "run cell and advance".
 function M.cell_after(parsed, index)
   return parsed[index + 2]
 end
 
---- Symmetric counterpart to cell_after - the cell right before the 0-based
---- `index`, or nil if `index` refers to the first cell.
 function M.cell_before(parsed, index)
   return parsed[index]
 end
 
---- Jupytext comments out IPython line magics (`%foo`) and shell/help
---- escapes (`!foo`, `?foo`) with a leading `# ` when it converts a notebook
---- into this `# %%` script view, so the resulting file stays parseable as
---- plain Python (see jupytext's magics.py `_MAGIC_RE`/
---- `_PYTHON_HELP_OR_BASH_CMD`) - it un-escapes them again on its own when
---- writing the buffer back to .ipynb JSON on save. Live execution/sync
---- reads this buffer directly, before any save happens, so without undoing
---- that same escaping here a `%time` or `!command` line would run as a
---- no-op comment instead of what it says. Deliberately does not match `%%`
---- (double-percent): jupytext represents an IPython *cell* magic like
---- `%%bash` completely differently - as a `# %% language="bash"` marker
---- with its whole body commented, not an inline-commented `%%bash` line
---- (which would collide with jupytext's own `# %%` cell-boundary syntax) -
---- reconstructing that is a separate, bigger feature. Also doesn't attempt
---- jupytext's no-prefix bash-command heuristic (`cd`, `ls`, ...) or
---- multi-line continuations, both rare enough not to be worth the extra
---- risk of false positives here.
-local function uncomment_magic_line(line)
-  local indent, rest = line:match("^(%s*)#%s?(.*)$")
-  if not indent then
-    return line
+--- Shared window/buffer-validated cell jump helper used by init.lua and outline.lua.
+--- `cell_index` is 0-based; `line_offset` defaults to 1 (first body line).
+function M.jump_to_cell_in_window(origin, bufnr, cell_index, line_offset, center)
+  if type(bufnr) ~= "number" or not vim.api.nvim_buf_is_valid(bufnr) then
+    return false
   end
-  if rest:match("^%%%a") or rest:match("^[!?][%a.~$\\/{}]") then
-    return indent .. rest
+  if type(cell_index) ~= "number" then
+    return false
   end
-  return line
+  local win = origin or vim.fn.bufwinid(bufnr)
+  if win == -1 or not vim.api.nvim_win_is_valid(win) then
+    return false
+  end
+  if vim.api.nvim_win_get_buf(win) ~= bufnr then
+    return false
+  end
+  local parsed = M.parse(bufnr)
+  local cell = parsed[cell_index + 1]
+  if not cell then
+    return false
+  end
+  local offset = type(line_offset) == "number" and line_offset or 1
+  local clamped = math.max(cell.start_line + 1, math.min(cell.start_line + offset, cell.end_line))
+  local target = math.min(clamped, vim.api.nvim_buf_line_count(bufnr))
+  if center then
+    vim.api.nvim_set_current_win(win)
+  end
+  vim.api.nvim_win_set_cursor(win, { target, 0 })
+  if center then
+    vim.cmd("normal! zz")
+  end
+  return true
 end
 
+--- Extracts body lines after the marker, trimming a single trailing blank
+--- inter-cell separator line when another cell follows.
 local function cell_body(lines, cell)
   local body = {}
   for line_number = cell.start_line + 1, cell.end_line do
     table.insert(body, lines[line_number])
   end
+  if #body > 0 and body[#body] == "" and cell.end_line < #lines then
+    table.remove(body)
+  end
   return body
 end
 
---- Extracts a cell's body source from an existing snapshot, excluding the
---- `# %%` marker line itself.
 function M.source_from_lines(lines, cell)
-  local body = cell_body(lines, cell)
-  if cell.cell_type == "code" then
-    for line_number, line in ipairs(body) do
-      body[line_number] = uncomment_magic_line(line)
-    end
-  end
-  return table.concat(body, "\n")
+  return table.concat(cell_body(lines, cell), "\n")
 end
 
---- Extracts a cell's body source, excluding the `# %%` marker line itself.
 function M.source(bufnr, cell)
   local _, lines = M.snapshot(bufnr)
   return M.source_from_lines(lines, cell)
 end
 
---- Same as source(), but for markdown and raw cells also strips jupytext's
---- `# ` line-comment prefix (jupytext comments out non-code cell text so the
---- file stays valid Python; it strips this back out when converting to
---- .ipynb JSON on save - live-sync reads the raw buffer before that
---- conversion ever happens, so we have to undo it ourselves here).
 function M.display_source_from_lines(lines, cell)
   if cell.cell_type ~= "markdown" and cell.cell_type ~= "raw" then
     return M.source_from_lines(lines, cell)

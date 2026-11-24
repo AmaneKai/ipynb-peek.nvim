@@ -1,5 +1,4 @@
---- Formatting for the kernel variable inspector (the data comes from the
---- server; see server/src/kernel/inspect-code.ts).
+--- Formatting for the kernel variable inspector.
 local float = require("ipynb-peek.float")
 
 local M = {}
@@ -20,6 +19,32 @@ function M.format_bytes(bytes)
   return string.format(value >= 100 and "%.0f %s" or "%.1f %s", value, units[unit])
 end
 
+local function sanitize_single_line(text)
+  return tostring(text or ""):gsub("[\r\n]+", " ")
+end
+
+--- UTF-8 and display-width safe truncation with ellipsis.
+function M.truncate_display(text, max_width)
+  text = sanitize_single_line(text)
+  if vim.fn.strdisplaywidth(text) <= max_width then
+    return text
+  end
+  local budget = math.max(0, max_width - 1)
+  local chars = vim.fn.strchars(text)
+  local out = ""
+  local width = 0
+  for i = 0, chars - 1 do
+    local ch = vim.fn.strcharpart(text, i, 1)
+    local cw = vim.fn.strdisplaywidth(ch)
+    if width + cw > budget then
+      break
+    end
+    out = out .. ch
+    width = width + cw
+  end
+  return out .. "…"
+end
+
 local function pad(text, width)
   local gap = width - vim.fn.strdisplaywidth(text)
   return text .. string.rep(" ", math.max(0, gap))
@@ -34,11 +59,11 @@ function M.format_rows(rows)
       total = total + row.size_bytes
     end
     table.insert(body, {
-      row.name,
-      row.type,
-      row.shape or "",
+      sanitize_single_line(row.name),
+      sanitize_single_line(row.type),
+      sanitize_single_line(row.shape),
       M.format_bytes(row.size_bytes),
-      row.preview or "",
+      M.truncate_display(row.preview or "", 60),
     })
   end
 

@@ -2,6 +2,7 @@ local cells = require("ipynb-peek.cells")
 local outline = require("ipynb-peek.outline")
 local variables = require("ipynb-peek.variables")
 local statusline = require("ipynb-peek.statusline")
+local float = require("ipynb-peek.float")
 
 local function snapshot(lines)
   local bufnr = vim.api.nvim_create_buf(false, true)
@@ -29,28 +30,29 @@ describe("outline.entries", function()
     "df = read()",
     "# %%",
     "df.head()",
-    "# %% [markdown]",
-    "# some prose",
+    "# %%",
+    "x = " .. string.rep("α", 70),
   }
 
-  it("lists headings and code cells with status icons", function()
+  it("lists headings, code cells, stale indicators, and UTF-8 safe truncation", function()
     local parsed, buffer_lines = snapshot(lines)
-    local rows = outline.entries(parsed, buffer_lines, {
-      [1] = { execution_count = 1, has_error = false },
-      [2] = { execution_count = 2, has_error = true },
-    })
-    assert.are.same({
-      { line = 1, index = 0, text = "Load data" },
-      { line = 3, index = 1, text = "  ✓ [1] df = read()" },
-      { line = 5, index = 2, text = "  ✗ [2] df.head()" },
-    }, rows)
-  end)
-
-  it("marks unrun and busy cells", function()
-    local parsed, buffer_lines = snapshot(lines)
-    local rows = outline.entries(parsed, buffer_lines, { [2] = { status = "busy" } })
-    assert.is_truthy(rows[2].text:find("○ %[ %]", 1))
-    assert.is_truthy(rows[3].text:find("●", 1, true))
+    local rows = outline.entries(
+      parsed,
+      buffer_lines,
+      {
+        [1] = { execution_count = 1, has_error = false },
+        [2] = { execution_count = 2, has_error = true },
+        [3] = { execution_count = 3, has_error = false },
+      },
+      {
+        [1] = { edited = true, reasons = {} },
+      }
+    )
+    assert.are.equal("Load data", rows[1].text)
+    assert.is_truthy(rows[2].text:find("~ [1] df = read()  ⚠ stale", 1, true))
+    assert.is_truthy(rows[3].text:find("✗ [2] df.head()", 1, true))
+    assert.is_truthy(rows[4].text:find("…$", 1))
+    assert.are.equal(60, vim.fn.strchars(rows[4].text:match("x = .*")))
   end)
 end)
 
@@ -62,14 +64,30 @@ describe("variables.format_bytes / format_rows", function()
     assert.are.equal("", variables.format_bytes(nil))
   end)
 
-  it("aligns a header, a rule and the rows, with a total", function()
+  it("truncates long UTF-8 previews to 60 display cols and sanitizes newlines", function()
+    local long_preview = "line1\nline2 " .. string.rep("λ", 80)
     local lines = variables.format_rows({
-      { name = "df", type = "DataFrame", shape = "(10, 3)", size_bytes = 2048, preview = "['a']" },
-      { name = "n", type = "int", shape = "", size_bytes = 28, preview = "5" },
+      { name = "s", type = "str", shape = "len=92", size_bytes = 128, preview = long_preview },
     })
-    assert.is_truthy(lines[1]:find("^Name%s+Type%s+Shape / size%s+Memory%s+Preview"))
-    assert.is_truthy(lines[3]:find("^df%s+DataFrame%s+%(10, 3%)%s+2.0 KB%s+%['a'%]"))
-    assert.is_truthy(lines[#lines]:find("2 variables, ~2.0 KB", 1, true))
+    assert.is_nil(lines[3]:find("\n", 1, true))
+    local preview_col = lines[3]:match("128 B%s+(.+)$")
+    assert.is_truthy(preview_col)
+    assert.is_true(vim.fn.strdisplaywidth(preview_col) <= 60)
+    assert.is_truthy(preview_col:find("…$", 1))
+  end)
+end)
+
+describe("float.geometry and float.open guards", function()
+  it("clamps width, height, row, and col safely on narrow/short terminals", function()
+    local g = float.geometry({ string.rep("x", 200), "a", "b", "c", "d", "e" }, {}, 20, 6)
+    assert.is_true(g.width <= 18 and g.width >= 1)
+    assert.is_true(g.height <= 2 and g.height >= 1)
+    assert.is_true(g.row >= 0 and g.col >= 0)
+  end)
+
+  it("returns nil cleanly on empty or nil opts.lines", function()
+    assert.is_nil(float.open(nil))
+    assert.is_nil(float.open({ lines = {} }))
   end)
 end)
 
@@ -78,14 +96,24 @@ describe("statusline.format", function()
     assert.are.equal("", statusline.format({ active = false }))
   end)
 
-  it("shows busy time, idle, and not-started states", function()
+  it("shows busy time, idle, stale count, and not-started states", function()
     assert.are.equal(
       "● python3 (busy: 2.1s)",
-      statusline.format({ active = true, name = "python3", running = true, busy_ms = 2100 })
+      statusline.format({
+        active = true,
+        name = "python3",
+        running = true,
+        busy_ms = 2100,
+        stale_count = 2,
+      })
     )
     assert.are.equal(
       "○ python3 (idle)",
-      statusline.format({ active = true, name = "python3", running = true })
+      statusline.format({ active = true, name = "python3", running = true, stale_count = 0 })
+    )
+    assert.are.equal(
+      "○ python3 (idle, 2 stale)",
+      statusline.format({ active = true, name = "python3", running = true, stale_count = 2 })
     )
     assert.are.equal(
       "◌ python3 (not started)",

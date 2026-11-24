@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+:root{--bg:#fff;--fg:#1f2328;--muted:#656d76;--surface:#f6f8fa;--border:#d0d7de;--accent:#0969da;--ok:#1a7f37;--warn:#9a6700;--err:#cf222e;--stale-bg:#fff8c5;--stale-bd:#d4a72c;--active-bd:#0969da;--code-bg:#f6f8fa}
+@media(prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--muted:#8b949e;--surface:#161b22;--border:#30363d;--accent:#58a6ff;--ok:#3fb950;--warn:#d29922;--err:#f85149;--stale-bg:#2a220c;--stale-bd:#9e6a03;--active-bd:#58a6ff;--code-bg:#161b22}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 system-ui,-apple-system,sans-serif}
+header.bar{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:12px;padding:8px 16px;background:var(--surface);border-bottom:1px solid var(--border);font-size:13px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--ok);display:inline-block}
+.dot.off{background:var(--err)}
+.bar .title{font-weight:600;margin-right:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar a,.bar button{color:var(--fg);background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:3px 8px;font-size:12px;text-decoration:none;cursor:pointer}
+main#notebook{max-width:960px;margin:0 auto;padding:16px}
+.cell{margin:0 0 14px;padding:10px 12px;border:1px solid var(--border);border-left:3px solid transparent;border-radius:4px;background:var(--bg)}
+.cell.cell-markdown{border-color:transparent;padding:4px 12px}
+.cell.active{border-left-color:var(--active-bd)}
+.cell.stale{background:var(--stale-bg);border-left-color:var(--stale-bd)}
+.cell-header{display:flex;align-items:center;gap:8px;margin-bottom:6px;font:12px/1 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted)}
+.badge{font-weight:600}
+.badge-ok{color:var(--ok)}.badge-busy{color:var(--warn)}.badge-err{color:var(--err)}.badge-stale{color:var(--warn)}
+.interrupt-btn{margin-left:auto;background:var(--err);color:#fff;border:0;border-radius:3px;padding:2px 6px;font-size:11px;cursor:pointer}
+pre{margin:0;padding:8px 10px;background:var(--code-bg);border-radius:4px;overflow-x:auto;font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:0.92em}
+p code,li code,td code{background:var(--surface);padding:1px 4px;border-radius:3px}
+.cell-outputs{margin-top:8px;display:flex;flex-direction:column;gap:6px}
+.output.stream-stderr{border-left:3px solid var(--err)}
+.output.error{border-left:3px solid var(--err);background:var(--code-bg)}
+.tb-jump{display:inline;background:none;border:0;padding:0;color:var(--accent);text-decoration:underline;font:inherit;cursor:pointer;text-align:left}
+.img-link img{max-width:100%;height:auto;display:block;border-radius:3px}
+.table-scroll{overflow-x:auto;max-height:480px;overflow-y:auto;border:1px solid var(--border);border-radius:4px}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{padding:5px 8px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
+thead th{position:sticky;top:0;background:var(--surface);font-weight:600}
+blockquote{margin:8px 0;padding:2px 12px;border-left:3px solid var(--border);color:var(--muted)}
+.math-block{margin:10px 0;padding:8px;text-align:center;font-family:Georgia,serif;overflow-x:auto}
+.math{font-family:Georgia,serif}
+#stdin-form{position:fixed;bottom:12px;right:12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px;display:none;gap:6px;align-items:center}
+#stdin-form.open{display:flex}
+body.present .cell-code .cell-header,body.present .cell-code .cell-input{display:none}
+body.present .cell{border-color:transparent}
+{{PYGMENTS_CSS}}
+@media print{header.bar,#stdin-form,.interrupt-btn{display:none!important}main#notebook{max-width:none;padding:0}.cell{break-inside:avoid;border-color:transparent}}
+</style>
+</head>
+<body>
+<!--LIVE_BAR-->
+<header class="bar">
+<span id="conn-dot" class="dot" title="Connection status"></span>
+<span class="title">{{TITLE}}</span>
+<button type="button" id="present-btn">Present</button>
+<a href="/export?token={{TOKEN_URL}}">Export HTML</a>
+<a href="/export?report=1&token={{TOKEN_URL}}">Report</a>
+</header>
+<!--/LIVE_BAR-->
+<main id="notebook">{{CELLS}}</main>
+<!--LIVE_SCRIPT-->
+<form id="stdin-form"><label id="stdin-prompt"></label><input id="stdin-in" autocomplete="off"><button type="submit">Send</button></form>
+<script>
+(()=>{
+const T={{TOKEN_JSON}},$=id=>document.getElementById(id),nb=$("notebook"),dot=$("conn-dot"),sf=$("stdin-form"),sp=$("stdin-prompt"),si=$("stdin-in");
+const q=encodeURIComponent(T),post=b=>fetch("/action?token="+q,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b)});
+const es=new EventSource("/events?token="+q);
+es.onopen=()=>dot&&dot.classList.remove("off");
+es.onerror=()=>dot&&dot.classList.add("off");
+es.addEventListener("full",e=>{nb.innerHTML=e.data;});
+es.addEventListener("cell",e=>{const d=JSON.parse(e.data),el=$("cell-"+d.index);if(el)el.outerHTML=d.html;});
+es.addEventListener("cursor",e=>{const d=JSON.parse(e.data);nb.querySelectorAll(".cell.active").forEach(c=>c.classList.remove("active"));const el=$("cell-"+d.index);if(el){el.classList.add("active");el.scrollIntoView({block:"nearest"});}});
+es.addEventListener("stdin",e=>{const d=JSON.parse(e.data);sp.textContent=d.prompt||"Input:";si.type=d.password?"password":"text";si.value="";sf.classList.add("open");si.focus();});
+es.addEventListener("print",()=>window.print());
+es.addEventListener("shutdown",()=>{es.close();dot&&dot.classList.add("off");});
+sf.addEventListener("submit",e=>{e.preventDefault();sf.classList.remove("open");post({action:"stdin",value:si.value});});
+nb.addEventListener("click",e=>{const b=e.target.closest(".tb-jump,.interrupt-btn");if(!b)return;if(b.classList.contains("interrupt-btn"))return post({action:"interrupt"});const s=b.dataset;post({action:"jump",kind:s.kind,cell:s.cell?+s.cell:null,exec_count:s.execCount?+s.execCount:null,own_index:s.ownIndex?+s.ownIndex:null,path:s.path||null,line:s.line?+s.line:1});});
+const pb=$("present-btn");if(pb)pb.onclick=()=>document.body.classList.toggle("present");
+})();
+</script>
+<!--/LIVE_SCRIPT-->
+</body>
+</html>

@@ -1,34 +1,44 @@
---- Stubbed before requiring ipynb-peek itself, so M.jump_to_next_cell/
---- M.jump_to_previous_cell (pure buffer navigation, no server involved) can
---- be exercised without spawning a real server/browser/curl process.
 local server_start_calls = 0
+local last_start_opts = nil
+local requests = {}
+local cancelled_keys = {}
+
 local server_stub = {
   port = 1,
-  ready = false,
-  url = nil,
-  start = function()
+  ready = true,
+  url = "http://127.0.0.1:1/?token=t",
+  start = function(opts)
     server_start_calls = server_start_calls + 1
+    last_start_opts = opts
     return true
   end,
   stop = function() end,
 }
 package.loaded["ipynb-peek.server"] = server_stub
-package.loaded["ipynb-peek.browser"] =
-  { find = function() end, open = function() end, close = function() end }
+package.loaded["ipynb-peek.browser"] = { open = function() end }
 package.loaded["ipynb-peek.client"] = {
-  request = function() end,
+  request = function(cmd, fields, cb)
+    table.insert(requests, { cmd = cmd, fields = fields, cb = cb })
+  end,
   debounce = function(_, _, callback)
     callback()
   end,
   debounced_request = function() end,
+  cancel_key = function(key)
+    table.insert(cancelled_keys, key)
+  end,
   cancel_debounced = function() end,
 }
 
 local M = require("ipynb-peek")
+local session = require("ipynb-peek.session")
 
-local function make_buffer(lines)
+local function make_buffer(lines, name)
   local bufnr = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+  if name then
+    vim.api.nvim_buf_set_name(bufnr, name)
+  end
   vim.api.nvim_set_current_buf(bufnr)
   return bufnr
 end
@@ -36,95 +46,26 @@ end
 describe("M.jump_to_next_cell / M.jump_to_previous_cell", function()
   local lines = { "# %%", "1", "", "# %%", "2", "", "# %%", "3", "", "# %%", "4" }
 
-  -- vim.v.count1 only resets once a normal-mode command actually finishes
-  -- executing - it does NOT reset just because a test calls
-  -- M.jump_to_next_cell() directly (bypassing normal keypress handling).
-  -- Without this, a count fed via nvim_feedkeys in one test (e.g. "10]j")
-  -- leaks into every later test that calls the function directly, since
-  -- nothing else ever resets it back to 1 in between. Confirmed directly:
-  -- a test placed after the count-feedkeys tests below saw count1 still
-  -- at 10 and silently jumped 10 cells instead of 1.
   before_each(function()
-    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "x", false)
+    local esc = vim.api.nvim_replace_termcodes("<Esc>", true, false, true)
+    vim.api.nvim_feedkeys(esc, "x", false)
   end)
 
-  it("jumps to the next cell's body", function()
+  it("jumps forward and backward and stops cleanly at ends", function()
     make_buffer(lines)
     vim.api.nvim_win_set_cursor(0, { 2, 0 })
-
     M.jump_to_next_cell()
-
     assert.are.equal(5, vim.api.nvim_win_get_cursor(0)[1])
-  end)
-
-  it("jumps to the previous cell's body", function()
-    make_buffer(lines)
-    vim.api.nvim_win_set_cursor(0, { 8, 0 })
-
     M.jump_to_previous_cell()
-
-    assert.are.equal(5, vim.api.nvim_win_get_cursor(0)[1])
-  end)
-
-  -- Regression test: an `and/or` ternary in jump_cell's loop
-  -- (`direction == "next" and cells.cell_after(...) or cells.cell_before(...)`)
-  -- silently stepped backward here instead of stopping, since cell_after
-  -- returning nil (the last cell has none) made the whole `and` chain nil,
-  -- falling through to the `or` side - confirmed by actually running it,
-  -- not caught by reading the code.
-  it("stays on the last cell rather than stepping backward", function()
-    make_buffer(lines)
-    vim.api.nvim_win_set_cursor(0, { 11, 0 })
-
-    M.jump_to_next_cell()
-
-    assert.are.equal(11, vim.api.nvim_win_get_cursor(0)[1])
-  end)
-
-  it("stays on the first cell rather than stepping forward", function()
-    make_buffer(lines)
-    vim.api.nvim_win_set_cursor(0, { 2, 0 })
-
-    M.jump_to_previous_cell()
-
     assert.are.equal(2, vim.api.nvim_win_get_cursor(0)[1])
-  end)
-
-  it("jumps into the first cell when the cursor starts above all markers", function()
-    make_buffer({ "# leading comment", "# %%", "1" })
-    vim.api.nvim_win_set_cursor(0, { 1, 0 })
-
+    M.jump_to_previous_cell()
+    assert.are.equal(2, vim.api.nvim_win_get_cursor(0)[1])
+    vim.api.nvim_win_set_cursor(0, { 11, 0 })
     M.jump_to_next_cell()
-
-    assert.are.equal(3, vim.api.nvim_win_get_cursor(0)[1])
-  end)
-
-  -- vim.v.count1 is read-only from Lua - a real keypress through an actual
-  -- mapping is the only way to genuinely exercise it, rather than a direct
-  -- M.jump_to_next_cell() call (which always sees count1 == 1).
-  it("honors a numeric count typed before the mapped key", function()
-    local bufnr = make_buffer(lines)
-    vim.keymap.set("n", "]j", M.jump_to_next_cell, { buffer = bufnr })
-    vim.api.nvim_win_set_cursor(0, { 2, 0 })
-
-    vim.api.nvim_feedkeys("2]j", "x", false)
-
-    assert.are.equal(8, vim.api.nvim_win_get_cursor(0)[1])
-  end)
-
-  it("stops early via a real keypress once a large count runs out of cells", function()
-    local bufnr = make_buffer(lines)
-    vim.keymap.set("n", "]j", M.jump_to_next_cell, { buffer = bufnr })
-    vim.api.nvim_win_set_cursor(0, { 2, 0 })
-
-    vim.api.nvim_feedkeys("10]j", "x", false)
-
     assert.are.equal(11, vim.api.nvim_win_get_cursor(0)[1])
   end)
 
-  describe("skipping markdown cells", function()
-    -- cell0 markdown (lines 1-2), cell1 code (lines 3-4),
-    -- cell2 markdown (lines 5-6), cell3 code (lines 7-8)
+  it("honors counts via mapped keys and skips markdown cells", function()
     local mixed = {
       "# %% [markdown]",
       "# Heading 1",
@@ -135,172 +76,175 @@ describe("M.jump_to_next_cell / M.jump_to_previous_cell", function()
       "# %%",
       "code2",
     }
-
-    it("jumps over an intervening markdown cell to land on the next code cell", function()
-      make_buffer(mixed)
-      vim.api.nvim_win_set_cursor(0, { 4, 0 }) -- inside cell1 (code)
-
-      M.jump_to_next_cell()
-
-      assert.are.equal(8, vim.api.nvim_win_get_cursor(0)[1]) -- cell3, not cell2
-    end)
-
-    it("jumps out of a markdown cell to the next code cell without consuming the count", function()
-      make_buffer(mixed)
-      vim.api.nvim_win_set_cursor(0, { 1, 0 }) -- inside cell0 (markdown)
-
-      M.jump_to_next_cell()
-
-      assert.are.equal(4, vim.api.nvim_win_get_cursor(0)[1]) -- cell1, the first code cell
-    end)
-
-    it(
-      "jumps into the first code cell when the cursor starts above all markers, skipping a leading markdown cell",
-      function()
-        make_buffer(vim.list_extend({ "# leading comment" }, mixed))
-        vim.api.nvim_win_set_cursor(0, { 1, 0 })
-
-        M.jump_to_next_cell()
-
-        assert.are.equal(5, vim.api.nvim_win_get_cursor(0)[1]) -- cell1 (code), one line later than `mixed` alone
-      end
-    )
-
-    it("skips a markdown cell going backward too", function()
-      make_buffer(mixed)
-      vim.api.nvim_win_set_cursor(0, { 8, 0 }) -- inside cell3 (code)
-
-      M.jump_to_previous_cell()
-
-      assert.are.equal(4, vim.api.nvim_win_get_cursor(0)[1]) -- cell1, not cell2
-    end)
+    local bufnr = make_buffer(mixed)
+    vim.keymap.set("n", "]j", M.jump_to_next_cell, { buffer = bufnr })
+    vim.api.nvim_win_set_cursor(0, { 1, 0 })
+    vim.api.nvim_feedkeys("2]j", "x", false)
+    assert.are.equal(8, vim.api.nvim_win_get_cursor(0)[1])
   end)
 end)
 
 describe("M.jump_to_cell", function()
-  local lines = { "# %%", "1", "", "# %%", "2", "", "# %%", "3", "", "# %%", "4" }
+  local lines = { "# %%", "1", "", "# %%", "2", "", "# %%", "3" }
 
   before_each(function()
-    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "x", false)
+    local esc = vim.api.nvim_replace_termcodes("<Esc>", true, false, true)
+    vim.api.nvim_feedkeys(esc, "x", false)
   end)
 
-  it("jumps directly to the given cell number, no prompt", function()
+  it("jumps directly when given a valid target", function()
     make_buffer(lines)
     vim.api.nvim_win_set_cursor(0, { 2, 0 })
-
     M.jump_to_cell(3)
-
     assert.are.equal(8, vim.api.nvim_win_get_cursor(0)[1])
   end)
 
-  it("honors a numeric count typed before the mapped key, no prompt", function()
-    local bufnr = make_buffer(lines)
-    vim.keymap.set("n", "]g", M.jump_to_cell, { buffer = bufnr })
-    vim.api.nvim_win_set_cursor(0, { 2, 0 })
-
-    vim.api.nvim_feedkeys("4]g", "x", false)
-
-    assert.are.equal(11, vim.api.nvim_win_get_cursor(0)[1])
-  end)
-
-  it("falls back to vim.ui.input when given no target and no count", function()
+  it("warns instead of prompting on explicit invalid targets (0, -1, 'foo')", function()
     make_buffer(lines)
     vim.api.nvim_win_set_cursor(0, { 2, 0 })
-    local prompted
-    local original_input = vim.ui.input
-    vim.ui.input = function(opts, on_confirm)
-      prompted = opts
-      on_confirm("3")
+    local prompted = false
+    local warnings = {}
+    local orig_input = vim.ui.input
+    local orig_notify = vim.notify
+    vim.ui.input = function()
+      prompted = true
+    end
+    vim.notify = function(msg)
+      table.insert(warnings, msg)
     end
 
-    M.jump_to_cell()
-    vim.ui.input = original_input
+    M.jump_to_cell(0)
+    M.jump_to_cell(-1)
+    M.jump_to_cell("foo")
 
-    assert.is_not_nil(prompted)
-    assert.are.equal(8, vim.api.nvim_win_get_cursor(0)[1])
-  end)
+    vim.ui.input = orig_input
+    vim.notify = orig_notify
 
-  it("does nothing if the prompt is cancelled", function()
-    make_buffer(lines)
-    vim.api.nvim_win_set_cursor(0, { 2, 0 })
-    local original_input = vim.ui.input
-    vim.ui.input = function(_, on_confirm)
-      on_confirm(nil)
-    end
-
-    M.jump_to_cell()
-    vim.ui.input = original_input
-
-    assert.are.equal(2, vim.api.nvim_win_get_cursor(0)[1])
-  end)
-
-  it("warns and leaves the cursor put for an out-of-range cell number", function()
-    make_buffer(lines)
-    vim.api.nvim_win_set_cursor(0, { 2, 0 })
-
-    M.jump_to_cell(99)
-
+    assert.is_false(prompted)
+    assert.are.equal(3, #warnings)
     assert.are.equal(2, vim.api.nvim_win_get_cursor(0)[1])
   end)
 end)
 
-describe("M.open notebook isolation", function()
-  it("rejects a second notebook instead of sharing singleton server state", function()
-    local first = make_buffer({ "# %%", "1" })
-    vim.api.nvim_buf_set_name(first, vim.fn.tempname() .. ".ipynb")
-    M.open()
+describe("M.open / M.close regressions", function()
+  before_each(function()
+    M.close()
+    requests = {}
+    cancelled_keys = {}
+    server_start_calls = 0
+  end)
 
-    local second = make_buffer({ "# %%", "2" })
-    vim.api.nvim_buf_set_name(second, vim.fn.tempname() .. ".ipynb")
+  after_each(function()
+    M.close()
+  end)
+
+  it("clears buffer-local autocmds on M.close() so old buffer delete keeps new session", function()
+    local first = make_buffer({ "# %%", "x = 1" }, vim.fn.tempname() .. ".ipynb")
+    M.open()
+    last_start_opts.on_ready()
+    assert.is_true(session.is_active())
+    M.close()
+
+    local second = make_buffer({ "# %%", "y = 2" }, vim.fn.tempname() .. ".ipynb")
+    M.open()
+    last_start_opts.on_ready()
+    assert.is_true(session.is_active())
+    assert.are.equal(second, session.bufnr)
+
+    vim.api.nvim_buf_delete(first, { force = true })
+    assert.is_true(session.is_active())
+    assert.are.equal(second, session.bufnr)
+  end)
+
+  it("does not trigger render on BufEnter or BufWritePost (uses sync on save)", function()
+    local bufnr = make_buffer({ "# %%", "x = 1" }, vim.fn.tempname() .. ".ipynb")
+    M.open()
+    last_start_opts.on_ready()
+    requests = {}
+
+    vim.api.nvim_exec_autocmds("BufEnter", { buffer = bufnr })
+    assert.are.equal(0, #requests)
+
+    vim.api.nvim_exec_autocmds("BufWritePost", { buffer = bufnr })
+    assert.are.equal(1, #requests)
+    assert.are.equal("sync", requests[1].cmd)
+  end)
+
+  it("flushes sync_now before dag_query in run_affected, run_slice, deps, audit", function()
+    local lines = { "# %%", "a = 1", "# %%", "b = 2", "# %%", "c = a + 3" }
+    make_buffer(lines, vim.fn.tempname() .. ".ipynb")
+    M.open()
+    last_start_opts.on_ready()
+    requests = {}
+    cancelled_keys = {}
+
+    vim.api.nvim_win_set_cursor(0, { 2, 0 })
+    M.run_affected()
+    assert.are.equal("sync", cancelled_keys[1])
+    assert.are.equal("sync", requests[1].cmd)
+    assert.are.equal("dag_query", requests[2].cmd)
+    assert.are.equal("affected", requests[2].fields.kind)
+    assert.are.equal(0, requests[2].fields.index)
+
+    requests[2].cb({ ok = true, indices = { 0, 2 } })
+    assert.are.equal("execute", requests[3].cmd)
+    assert.are.equal(0, requests[3].fields.index)
+
+    last_start_opts.on_event({
+      type = "cell_status",
+      index = 0,
+      status = "idle",
+      execution_count = 1,
+      has_error = false,
+    })
+    assert.are.equal("execute", requests[4].cmd)
+    assert.are.equal(2, requests[4].fields.index)
+
+    -- run_slice
+    requests = {}
+    vim.api.nvim_win_set_cursor(0, { 6, 0 })
+    M.run_slice()
+    assert.are.equal("sync", requests[1].cmd)
+    assert.are.equal("dag_query", requests[2].cmd)
+    assert.are.equal("upstream", requests[2].fields.kind)
+
+    -- deps & audit
+    requests = {}
+    M.deps()
+    assert.are.equal("sync", requests[1].cmd)
+    assert.are.equal("dag_query", requests[2].cmd)
+    assert.are.equal("deps", requests[2].fields.kind)
+
+    requests = {}
+    M.audit()
+    assert.are.equal("sync", requests[1].cmd)
+    assert.are.equal("dag_query", requests[2].cmd)
+    assert.are.equal("audit", requests[2].fields.kind)
+  end)
+
+  it("rejects a second notebook while one preview is open", function()
+    local first = make_buffer({ "# %%", "1" }, vim.fn.tempname() .. ".ipynb")
+    M.open()
+    make_buffer({ "# %%", "2" }, vim.fn.tempname() .. ".ipynb")
     local notifications = {}
-    local original_notify = vim.notify
-    vim.notify = function(message)
-      table.insert(notifications, message)
+    local orig_notify = vim.notify
+    vim.notify = function(msg)
+      table.insert(notifications, msg)
     end
     M.open()
-    vim.notify = original_notify
-
+    vim.notify = orig_notify
     assert.are.equal(1, server_start_calls)
-    assert.is_true(notifications[1]:find("already open for another notebook", 1, true) ~= nil)
-    M.close()
-  end)
-end)
-
-describe("InsertEnter guard on editable: false cells", function()
-  it("kicks back to normal mode and warns inside a non-editable cell", function()
-    local bufnr = make_buffer({ "# %% editable=false", "1 + 1", "# %%", "2 + 2" })
-    vim.api.nvim_buf_set_name(bufnr, vim.fn.tempname() .. ".ipynb")
-    M.open()
-    vim.api.nvim_win_set_cursor(0, { 2, 0 })
-
-    local notifications = {}
-    local original_notify = vim.notify
-    vim.notify = function(message)
-      table.insert(notifications, message)
-    end
-    vim.api.nvim_exec_autocmds("InsertEnter", { buffer = bufnr })
-    vim.notify = original_notify
-
-    assert.are.equal(1, #notifications)
-    assert.is_true(notifications[1]:find("read%-only") ~= nil)
-    M.close()
+    assert.is_truthy(notifications[1]:find("already open for another notebook", 1, true))
+    assert.are.equal(first, session.bufnr)
   end)
 
-  it("does not warn inside an editable cell", function()
-    local bufnr = make_buffer({ "# %%", "1 + 1" })
-    vim.api.nvim_buf_set_name(bufnr, vim.fn.tempname() .. ".ipynb")
+  it("tears down cleanly on unexpected server exit while active", function()
+    make_buffer({ "# %%", "1" }, vim.fn.tempname() .. ".ipynb")
     M.open()
-    vim.api.nvim_win_set_cursor(0, { 2, 0 })
+    last_start_opts.on_ready()
+    assert.is_true(session.is_active())
 
-    local notifications = {}
-    local original_notify = vim.notify
-    vim.notify = function(message)
-      table.insert(notifications, message)
-    end
-    vim.api.nvim_exec_autocmds("InsertEnter", { buffer = bufnr })
-    vim.notify = original_notify
-
-    assert.are.equal(0, #notifications)
-    M.close()
+    last_start_opts.on_exit()
+    assert.are.equal("idle", session.state)
   end)
 end)

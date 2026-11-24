@@ -1,18 +1,38 @@
 --- A centered, read-only floating window over a scratch buffer.
 local M = {}
 
---- opts: title, lines (string[]), max_width, max_height,
----       on_select(line_number) called on <CR> with the window closed first,
----       cursor_line (initial 1-based line)
---- Returns the window id.
-function M.open(opts)
-  local lines = opts.lines
-  local width = 20
+--- Pure geometry calculation, safely clamped for narrow/short terminals.
+function M.geometry(lines, opts, columns, total_lines)
+  opts = opts or {}
+  columns = columns or vim.o.columns
+  total_lines = total_lines or vim.o.lines
+
+  local max_avail_w = math.max(10, columns - 4)
+  local max_avail_h = math.max(1, total_lines - 4)
+
+  local desired_w = 20
   for _, line in ipairs(lines) do
-    width = math.max(width, vim.fn.strdisplaywidth(line))
+    desired_w = math.max(desired_w, vim.fn.strdisplaywidth(line))
   end
-  width = math.min(width + 2, opts.max_width or math.floor(vim.o.columns * 0.8))
-  local height = math.max(1, math.min(#lines, opts.max_height or math.floor(vim.o.lines * 0.7)))
+  local cap_w = math.min(opts.max_width or math.floor(columns * 0.8), max_avail_w)
+  local width = math.max(1, math.min(desired_w + 2, math.max(1, cap_w)))
+  -- Never exceed available editor width when terminal is ultra-narrow
+  width = math.min(width, math.max(1, columns - 2))
+
+  local cap_h = math.min(opts.max_height or math.floor(total_lines * 0.7), max_avail_h)
+  local height = math.max(1, math.min(#lines, math.max(1, cap_h)))
+
+  local row = math.max(0, math.floor((total_lines - height) / 2) - 1)
+  local col = math.max(0, math.floor((columns - width) / 2))
+  return { width = width, height = height, row = row, col = col }
+end
+
+function M.open(opts)
+  if type(opts) ~= "table" or type(opts.lines) ~= "table" or #opts.lines == 0 then
+    return nil
+  end
+  local lines = opts.lines
+  local geom = M.geometry(lines, opts)
 
   local buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
@@ -21,10 +41,10 @@ function M.open(opts)
 
   local win = vim.api.nvim_open_win(buf, true, {
     relative = "editor",
-    width = width,
-    height = height,
-    row = math.floor((vim.o.lines - height) / 2) - 1,
-    col = math.floor((vim.o.columns - width) / 2),
+    width = geom.width,
+    height = geom.height,
+    row = geom.row,
+    col = geom.col,
     style = "minimal",
     border = "rounded",
     title = opts.title and (" " .. opts.title .. " ") or nil,

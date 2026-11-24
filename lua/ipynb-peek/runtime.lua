@@ -1,7 +1,6 @@
---- What the server last told us about execution state, kept apart from the
---- session lifecycle (session.lua) and the buffer so the text-objects,
---- outline, and statusline can all read it without touching init.lua's
---- internals. Pure data: no buffers, processes, or timers.
+--- Execution & DAG staleness state reported by the server, kept apart from
+--- session lifecycle (session.lua) and buffer state so text-objects, outline,
+--- status signs, and statusline can read it cleanly.
 local M = {}
 
 local uv = vim.uv or vim.loop
@@ -10,12 +9,15 @@ local uv = vim.uv or vim.loop
 M.cells = {}
 --- 0-based cell index -> uv.now() when it was last seen turning busy
 M.busy_since = {}
+--- 0-based cell index -> { edited = bool, reasons = [{ from, symbols, kind }] }
+M.stale = {}
 --- { name = string|nil, running = boolean }
 M.kernel = { name = nil, running = false }
 
 function M.reset()
   M.cells = {}
   M.busy_since = {}
+  M.stale = {}
   M.kernel = { name = nil, running = false }
 end
 
@@ -31,7 +33,6 @@ function M.set_cell(info)
   end
 end
 
---- Replaces every cell's status (a full render/sync/restart snapshot).
 function M.set_all(list)
   local busy_since = M.busy_since
   M.cells = {}
@@ -44,11 +45,36 @@ function M.set_all(list)
   end
 end
 
+--- Replaces the stale map (accepts numeric or string keys from JSON).
+function M.set_stale(stale_map)
+  M.stale = {}
+  if type(stale_map) ~= "table" then
+    return
+  end
+  for k, v in pairs(stale_map) do
+    local idx = tonumber(k)
+    if idx ~= nil and type(v) == "table" then
+      M.stale[idx] = v
+    end
+  end
+end
+
+function M.is_stale(index)
+  return M.stale[index] ~= nil
+end
+
+function M.stale_count()
+  local count = 0
+  for _ in pairs(M.stale) do
+    count = count + 1
+  end
+  return count
+end
+
 function M.set_kernel(info)
   M.kernel = { name = info.name, running = info.running == true }
 end
 
---- 0-based index of the busy cell that has been busy longest, plus how long.
 function M.busy()
   local oldest_index, oldest_since
   for index, since in pairs(M.busy_since) do

@@ -2,6 +2,7 @@
 ---   ic / ac   inside (body) / around (marker + body) the current cell
 ---   ]c / [c   next / previous cell marker
 ---   ]e / [e   next / previous cell whose last run errored
+---   ]s / [s   next / previous stale cell
 local cells = require("ipynb-peek.cells")
 local runtime = require("ipynb-peek.runtime")
 
@@ -14,21 +15,20 @@ M.defaults = {
   prev_cell = "[c",
   next_error = "]e",
   prev_error = "[e",
+  next_stale = "]s",
+  prev_stale = "[s",
 }
 
---- Line range (1-based, inclusive) a text-object covers, or nil if empty.
 function M.range(cell, kind)
   if kind == "around" then
     return cell.start_line, cell.end_line
   end
   if cell.end_line <= cell.start_line then
-    return nil -- a bare marker line has no body
+    return nil
   end
   return cell.start_line + 1, cell.end_line
 end
 
---- Marker line (1-based) to land on for a `]c`-style motion from `line`, or
---- nil when there is nowhere to go in that direction.
 function M.boundary_target(parsed, line, direction)
   if direction == "next" then
     for _, cell in ipairs(parsed) do
@@ -38,7 +38,6 @@ function M.boundary_target(parsed, line, direction)
     end
     return nil
   end
-  -- previous: this cell's own marker first (if we're below it), else the one before
   local target
   for _, cell in ipairs(parsed) do
     if cell.start_line < line then
@@ -48,24 +47,30 @@ function M.boundary_target(parsed, line, direction)
   return target
 end
 
---- 1-based marker line of the next/previous cell (relative to the cell
---- containing `line`) whose last run errored, or nil.
-function M.error_target(parsed, line, direction, has_error)
-  local current = cells.cell_index_at(parsed, line) -- 0-based, or nil outside any cell
+local function scan_target(parsed, line, direction, predicate)
+  local current = cells.cell_index_at(parsed, line)
   if direction == "next" then
     for index = (current or -1) + 1, #parsed - 1 do
-      if has_error(index) then
+      if predicate(index) then
         return parsed[index + 1].start_line
       end
     end
   else
     for index = (current or #parsed) - 1, 0, -1 do
-      if has_error(index) then
+      if predicate(index) then
         return parsed[index + 1].start_line
       end
     end
   end
   return nil
+end
+
+function M.error_target(parsed, line, direction, has_error)
+  return scan_target(parsed, line, direction, has_error)
+end
+
+function M.stale_target(parsed, line, direction, is_stale)
+  return scan_target(parsed, line, direction, is_stale)
 end
 
 local function leave_visual_if_needed()
@@ -93,15 +98,13 @@ end
 
 function M.jump(direction)
   local bufnr = vim.api.nvim_get_current_buf()
-  local target
   for _ = 1, vim.v.count1 do
     local line = vim.api.nvim_win_get_cursor(0)[1]
     local next_line = M.boundary_target(cells.parse(bufnr), line, direction)
     if not next_line then
       break
     end
-    target = next_line
-    vim.api.nvim_win_set_cursor(0, { target, 0 })
+    vim.api.nvim_win_set_cursor(0, { next_line, 0 })
   end
 end
 
@@ -116,8 +119,17 @@ function M.jump_error(direction)
   end
 end
 
---- Buffer-local mappings. `keys` entries set to false/nil are skipped.
---- ]c / [c fall back to Vim's own diff-mode motions in diff windows.
+function M.jump_stale(direction)
+  local bufnr = vim.api.nvim_get_current_buf()
+  local line = vim.api.nvim_win_get_cursor(0)[1]
+  local target = M.stale_target(cells.parse(bufnr), line, direction, runtime.is_stale)
+  if target then
+    vim.api.nvim_win_set_cursor(0, { target, 0 })
+  else
+    vim.notify("[ipynb-peek] no " .. direction .. " stale cell", vim.log.levels.INFO)
+  end
+end
+
 function M.apply(bufnr, keys)
   keys = vim.tbl_extend("force", M.defaults, keys or {})
   local function map(modes, lhs, fn, desc)
@@ -146,6 +158,12 @@ function M.apply(bufnr, keys)
   map({ "n", "x" }, keys.prev_error, function()
     M.jump_error("prev")
   end, "previous cell with error")
+  map({ "n", "x" }, keys.next_stale, function()
+    M.jump_stale("next")
+  end, "next stale cell")
+  map({ "n", "x" }, keys.prev_stale, function()
+    M.jump_stale("prev")
+  end, "previous stale cell")
 end
 
 return M
